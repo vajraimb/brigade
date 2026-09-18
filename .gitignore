@@ -1,0 +1,17 @@
+node_modules
+.vercel
+.tanstack
+.grok
+artifacts
+screenshots
+*.log
+.project_id
+.node_modules.lock
+.DS_Store
+dist
+.env
+.env.local
+.vite
+*.tsbuildinfo
+AGENTS.md
+AGENTS.project.md
