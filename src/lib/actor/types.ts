@@ -1,4 +1,5 @@
 export type Pid = number;
+export type Ref = number;
 
 export type Station = "grill" | "fry" | "pass";
 
@@ -27,6 +28,10 @@ export type Msg =
   | { t: "Ready"; id: number; item: string; order: Pid }
   | { t: "Crash" }
   | { t: "EXIT"; pid: Pid; reason: string }
+  | { t: "DOWN"; ref: Ref; pid: Pid; reason: string }
+  | { t: "Call"; from: Pid; ref: Ref; req: unknown }
+  | { t: "Reply"; ref: Ref; reply: unknown }
+  | { t: "Cast"; req: unknown }
   | { t: "StartChild"; item: MenuItem; key: string }
   | { t: "Timeout" }
   | Term;
@@ -46,7 +51,9 @@ export type Effect =
   | { op: "trap_exit"; on: boolean; loc: string }
   | { op: "now"; loc: string }
   | { op: "exit"; reason: string; loc: string }
-  | { op: "exit_pid"; pid: Pid; reason: string; loc: string };
+  | { op: "exit_pid"; pid: Pid; reason: string; loc: string }
+  | { op: "monitor"; pid: Pid; loc: string }
+  | { op: "demonitor"; ref: Ref; flush?: boolean; loc: string };
 
 export type ProcessStatus =
   | "runnable"
@@ -62,6 +69,10 @@ export type Process = {
   alive: boolean;
   trapExit: boolean;
   links: Set<Pid>;
+  /** ref → target this process monitors */
+  monitors: Map<Ref, Pid>;
+  /** ref → watcher monitoring this process */
+  watchedBy: Map<Ref, Pid>;
   status: ProcessStatus;
   parent?: Pid;
   reductions: number;
@@ -99,6 +110,8 @@ export type TraceOp =
   | "register"
   | "link"
   | "unlink"
+  | "monitor"
+  | "demonitor"
   | "drop";
 
 export type TraceEvent = {
@@ -199,6 +212,13 @@ export function E() {
       op: "exit_pid",
       pid,
       reason,
+      loc,
+    }),
+    monitor: (pid: Pid, loc: string): Effect => ({ op: "monitor", pid, loc }),
+    demonitor: (ref: Ref, loc: string, flush = false): Effect => ({
+      op: "demonitor",
+      ref,
+      flush,
       loc,
     }),
   };

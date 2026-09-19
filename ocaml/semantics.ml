@@ -4,13 +4,15 @@
  * the spec: Erlang semantics on top, OCaml 5 effects in the middle,
  * Eio fibers underneath.  Eio is not allowed to leak into the API.
  *
- *     Erlang  spawn / send / receive / link / exit / supervisor
+ *     Erlang  spawn / send / receive / link / monitor / exit / supervisor
  *        │
  *     Effects perform Receive → handler scans mailbox, continues k
  *        │     (receive / send / wait belong here)
- *     Runtime Pid · mailbox · link · lifecycle · supervision
+ *     Runtime Pid · mailbox · link · monitor · lifecycle · supervision
  *        │
  *     Eio     Fiber.fork / Switch / Clock
+ *
+ * Switch ≠ link graph.  See actor.ml.  Multi-domain Eio is v2.
  *)
 
 open Actor
@@ -61,6 +63,25 @@ type process = {
    unlink: bidirectional; cascade stops.
 *)
 
+(* monitor is unidirectional.  B dies → A gets DOWN, A stays alive.
+   That is the whole difference from link, and the reason
+   gen_server:call can fail instead of hanging:
+
+     Ref = monitor B
+     send B (Call me Ref ping)
+     receive
+       | Reply Ref pong -> demonitor Ref ~flush:true; pong
+       | Down  Ref killed -> demonitor Ref ~flush:true; fail
+
+   monitor a dead Pid → immediate DOWN noproc.
+   demonitor ~flush:true sweeps a DOWN already in the mailbox.
+   demonitor without flush leaves it for receive.
+*)
+
+(* gen_server is a functor, not a -behaviour attribute.  Callback
+   state is abstract; missing handle_call is a type error.  Cast is
+   send with no monitor and no reply. *)
+
 (* Supervision.  rest_for_one is the one people skip:
 
      start order  A, B, C
@@ -76,19 +97,4 @@ type process = {
      permanent   always
      transient   only abnormal
      temporary   never   (simple_one_for_one children)
-*)
-
-(* Combination.  Single rules being right is not enough.  Bugs hide
-   where they stack:
-
-     observer  trap_exit + link(grill)
-     grill     supervised, permanent
-     mailbox   [ticket; EXIT killed; ready]
-     receive   ready
-     mailbox   [ticket; EXIT killed]
-     whereis   "grill"  →  Pid 18
-     send      Pid 17   →  drop
-
-   rest_for_one + mailbox: later siblings die with their mail.
-   intensity + parent: the next supervisor restarts the whole subtree.
 *)

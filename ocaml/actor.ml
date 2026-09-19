@@ -2,8 +2,16 @@
    scheduled on Eio fibers.
 
    Effect layer:  receive / send / wait  (perform, scan, continue k)
-   Runtime layer: Pid, mailbox, link, lifecycle, supervision
+   Runtime layer: Pid, mailbox, link, monitor, lifecycle, supervision
    Eio:           Fiber.fork / Switch / Clock — scheduling only.
+
+   Switch is not the link graph.  Eio.Switch cancels fibers and closes
+   resources when a tree of forks unwinds.  Erlang link is a bidirectional
+   death-propagation graph on Pids, with trap_exit converting the signal
+   into a mailbox message.  Mapping link onto Switch would make `normal`
+   kill the partner, make `kill` indistinguishable from cancel, and make
+   unlink impossible.  Each process is a fiber forked on the scheduler
+   switch; death of a linked partner is `die` / `propagate` in this file.
 
    Each process runs inside a deep handler.  perform Spawn/Send/Receive
    is the program; the handler is the runtime (mailboxes + fibers).
@@ -13,6 +21,7 @@ open Effect
 open Effect.Deep
 
 type pid = int
+type ref = int
 
 type msg = ..
 
@@ -28,6 +37,8 @@ type process = {
   mutable alive : bool;
   mutable trap_exit : bool;
   links : (pid, unit) Hashtbl.t;
+  monitors : (ref, pid) Hashtbl.t;
+  watched_by : (ref, pid) Hashtbl.t;
 }
 
 type _ Effect.t +=
@@ -44,6 +55,8 @@ type _ Effect.t +=
   | Now       : float t
   | Exit_me   : string -> unit t
   | Signal    : pid * string -> unit t
+  | Monitor   : pid -> ref t
+  | Demonitor : ref * bool -> unit t
 
 let spawn ?(name = "") ?(link = false) fn =
   perform (Spawn { name; fn; link })
@@ -61,9 +74,12 @@ let trap_exit on = perform (Trap_exit on)
 let now () = perform Now
 let exit_reason reason = perform (Exit_me reason)
 let exit_pid pid reason = perform (Signal (pid, reason))
+let monitor pid = perform (Monitor pid)
+let demonitor ?(flush = false) r = perform (Demonitor (r, flush))
 
 type msg +=
   | Exit of pid * string
+  | Down of ref * pid * string
   | Timeout
   | Crash
 
@@ -88,6 +104,11 @@ module Mailbox = struct
     Queue.add m t.q;
     Eio.Condition.broadcast t.cond
 
+  (* Same scan as receive, discard the match.  demonitor ~flush uses this
+     so a DOWN already in the mailbox is taken even if it is not at the
+     head — OTP does `receive {'DOWN', Ref, ...} after 0`. *)
+  let drop t pred = ignore (scan t.q pred [])
+
   let rec take t pred =
     match scan t.q pred [] with
     | Some m -> m
@@ -104,6 +125,7 @@ module Scheduler (Env : sig
 end) =
 struct
   let next_pid = ref 1
+  let next_ref = ref 1
   let procs : (pid, proc) Hashtbl.t = Hashtbl.create 32
   let names : (string, pid) Hashtbl.t = Hashtbl.create 16
 
@@ -112,7 +134,8 @@ struct
     incr next_pid;
     let p =
       { pid; name; mailbox = Mailbox.create (); alive = true;
-        trap_exit = false; links = Hashtbl.create 4 }
+        trap_exit = false; links = Hashtbl.create 4;
+        monitors = Hashtbl.create 4; watched_by = Hashtbl.create 4 }
     in
     Hashtbl.add procs pid p;
     p
@@ -135,7 +158,21 @@ struct
               if q.trap_exit then deliver q.pid (Exit (p.pid, reason))
               else if reason <> "normal" then die q reason
           | _ -> ())
-        p.links
+        p.links;
+      Hashtbl.iter (fun r watcher ->
+          match Hashtbl.find_opt procs watcher with
+          | Some q when q.alive ->
+              Hashtbl.remove q.monitors r;
+              deliver q.pid (Down (r, p.pid, reason))
+          | _ -> ())
+        p.watched_by;
+      Hashtbl.clear p.watched_by;
+      Hashtbl.iter (fun r target ->
+          match Hashtbl.find_opt procs target with
+          | Some q -> Hashtbl.remove q.watched_by r
+          | None -> ())
+        p.monitors;
+      Hashtbl.clear p.monitors
     end
 
   let signal from dest reason =
@@ -203,6 +240,29 @@ struct
               Some (fun k ->
                   Option.iter (fun q -> if q.alive then signal p q reason)
                     (Hashtbl.find_opt procs pid);
+                  continue k ())
+          | Monitor pid ->
+              Some (fun k ->
+                  let r = !next_ref in
+                  incr next_ref;
+                  (match Hashtbl.find_opt procs pid with
+                   | Some q when q.alive ->
+                       Hashtbl.replace p.monitors r pid;
+                       Hashtbl.replace q.watched_by r p.pid
+                   | _ -> deliver p.pid (Down (r, pid, "noproc")));
+                  continue k r)
+          | Demonitor (r, flush) ->
+              Some (fun k ->
+                  (match Hashtbl.find_opt p.monitors r with
+                   | Some pid ->
+                       Hashtbl.remove p.monitors r;
+                       Option.iter (fun q -> Hashtbl.remove q.watched_by r)
+                         (Hashtbl.find_opt procs pid)
+                   | None -> ());
+                  if flush then
+                    Mailbox.drop p.mailbox (function
+                        | Down (x, _, _) when x = r -> true
+                        | _ -> false);
                   continue k ())
           | _ -> None)
       }

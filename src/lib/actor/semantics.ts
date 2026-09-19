@@ -1,5 +1,6 @@
 import { Runtime } from "./runtime.ts";
 import { simpleOneForOne, supervise } from "./supervisor.ts";
+import { call, echo, startLink } from "./gen_server.ts";
 import {
   fx,
   term,
@@ -7,11 +8,19 @@ import {
   type Msg,
   type Pid,
   type ProcFn,
+  type Ref,
 } from "./types.ts";
 
 const L = "semantics.ml:run";
 
-export type SemGroup = "combo" | "primitive" | "mailbox" | "link" | "supervisor";
+export type SemGroup =
+  | "combo"
+  | "primitive"
+  | "mailbox"
+  | "link"
+  | "supervisor"
+  | "monitor"
+  | "genserver";
 
 export type SemResult = {
   ok: boolean;
@@ -39,11 +48,37 @@ export type SemCase = {
 
 export const GROUP_LABEL: Record<SemGroup, string> = {
   combo: "组合",
+  monitor: "monitor",
+  genserver: "gen_server",
   primitive: "原语",
   mailbox: "邮箱",
   link: "链接 / 退出",
   supervisor: "监督树",
 };
+
+/** Kernel cases that Erlang/OTP 29.1 should print identically. */
+export const OTP_IDS = [
+  "spawn",
+  "send-receive",
+  "fifo",
+  "selective-receive",
+  "mailbox-dies",
+  "drop-dead",
+  "link-cascade",
+  "normal-no-cascade",
+  "trap-exit",
+  "system-message",
+  "kill-untrappable",
+  "unlink-isolates",
+  "exit-pid",
+  "monitor-down",
+  "monitor-noproc",
+  "demonitor-flush",
+  "demonitor-leaves",
+  "gs-call",
+  "gs-call-crash",
+  "gs-cast",
+] as const;
 
 const DUMMY: MenuItem = {
   id: "x",
@@ -77,6 +112,7 @@ function tagsOf(r: Runtime, pid: Pid | undefined): string[] {
   return p.mailbox.map((m) => {
     if (m.t === "Term") return m.tag;
     if (m.t === "EXIT") return `EXIT ${m.reason}`;
+    if (m.t === "DOWN") return `DOWN ${m.reason}`;
     return m.t;
   });
 }
@@ -998,6 +1034,251 @@ export const CASES: SemCase[] = [
       );
     },
   },
+  {
+    id: "monitor-down",
+    group: "monitor",
+    primitive: "monitor",
+    title: "monitor 是单向的，DOWN 进邮箱，监视者不死",
+    erlang: "erlang:monitor(process, Pid). B 死 → {'DOWN', Ref, process, B, Reason}。A 还活着，没有 EXIT。",
+    run() {
+      const r = rt();
+      let reason = "";
+      r.spawn(
+        "a",
+        function* () {
+          yield fx.register("a", L);
+          const b = (yield fx.spawn("b", park("b"), L, false)) as Pid;
+          const ref = (yield fx.monitor(b, L)) as Ref;
+          const m = (yield fx.receive((x) => x.t === "DOWN" && x.ref === ref, L)) as Msg;
+          if (m.t === "DOWN") reason = m.reason;
+          yield fx.sleep(99999, L);
+        },
+        undefined,
+        false,
+      );
+      r.flush();
+      r.kill(r.whereis("b")!, "killed");
+      r.flush();
+      const a = r.whereis("a");
+      return eq(
+        "DOWN killed · A alive",
+        `DOWN ${reason} · ${r.processes.get(a!)?.alive ? "A alive" : "A dead"}`,
+        {
+          diagram: {
+            left: { name: "A", live: true },
+            right: { name: "B", live: false },
+            signal: "DOWN (no cascade)",
+          },
+        },
+      );
+    },
+  },
+  {
+    id: "monitor-noproc",
+    group: "monitor",
+    primitive: "monitor noproc",
+    title: "监视已死 Pid，立刻 DOWN noproc",
+    erlang: "monitor 一个不存在的 Pid → 立即 {'DOWN', Ref, process, Pid, noproc}",
+    run() {
+      const r = rt();
+      let reason = "";
+      const ghost = r.spawn("ghost", halt("ghost"), undefined, false);
+      r.flush();
+      r.spawn(
+        "a",
+        function* () {
+          yield fx.register("a", L);
+          const ref = (yield fx.monitor(ghost, L)) as Ref;
+          const m = (yield fx.receive((x) => x.t === "DOWN" && x.ref === ref, L)) as Msg;
+          if (m.t === "DOWN") reason = m.reason;
+          yield fx.sleep(99999, L);
+        },
+        undefined,
+        false,
+      );
+      r.flush();
+      return eq("noproc", reason);
+    },
+  },
+  {
+    id: "demonitor-flush",
+    group: "monitor",
+    primitive: "demonitor flush",
+    title: "demonitor flush 把已到的 DOWN 从邮箱拿走",
+    erlang: "demonitor(Ref, [flush]) 解开监视并扫掉对应 DOWN",
+    run() {
+      const r = rt();
+      r.spawn(
+        "a",
+        function* () {
+          yield fx.register("a", L);
+          const b = (yield fx.spawn("b", park("b"), L, false)) as Pid;
+          const ref = (yield fx.monitor(b, L)) as Ref;
+          yield fx.sleep(1, L);
+          yield fx.demonitor(ref, L, true);
+          yield fx.sleep(99999, L);
+        },
+        undefined,
+        false,
+      );
+      r.flush();
+      r.kill(r.whereis("b")!, "killed");
+      r.flush();
+      const a = r.whereis("a")!;
+      r.step(2);
+      r.flush();
+      return eq("[]", tagsOf(r, a), { after: tagsOf(r, a), step: "demonitor flush" });
+    },
+  },
+  {
+    id: "demonitor-leaves",
+    group: "monitor",
+    primitive: "demonitor",
+    title: "demonitor 不 flush 则 DOWN 留在邮箱",
+    erlang: "demonitor(Ref) 只解开。已经入队的 DOWN 还在，receive 可以取到。",
+    run() {
+      const r = rt();
+      r.spawn(
+        "a",
+        function* () {
+          yield fx.register("a", L);
+          const b = (yield fx.spawn("b", park("b"), L, false)) as Pid;
+          const ref = (yield fx.monitor(b, L)) as Ref;
+          yield fx.sleep(1, L);
+          yield fx.demonitor(ref, L, false);
+          yield fx.sleep(99999, L);
+        },
+        undefined,
+        false,
+      );
+      r.flush();
+      r.kill(r.whereis("b")!, "killed");
+      r.flush();
+      const a = r.whereis("a")!;
+      const before = tagsOf(r, a);
+      r.step(2);
+      r.flush();
+      return eq("[DOWN killed]", tagsOf(r, a), {
+        before,
+        after: tagsOf(r, a),
+        step: "demonitor",
+      });
+    },
+  },
+  {
+    id: "gs-call",
+    group: "genserver",
+    primitive: "gen_server:call",
+    title: "call 是 monitor + Reply，不是裸 send/receive",
+    erlang: "gen_server:call(Pid, ping) → pong。server 挂了会 DOWN，而不是永远等。",
+    run() {
+      const r = rt();
+      let reply: unknown = "";
+      r.spawn("echo", startLink("echo", echo()), undefined, false);
+      r.spawn(
+        "client",
+        function* () {
+          yield fx.register("client", L);
+          const pid = (yield fx.whereis("echo", L)) as Pid | null;
+          reply = yield* call(pid!, "ping", L);
+          yield fx.sleep(99999, L);
+        },
+        undefined,
+        false,
+      );
+      r.flush();
+      return eq("pong", reply, {
+        diagram: {
+          left: { name: "client", live: true },
+          right: { name: "echo", live: true },
+          signal: "monitor · call · Reply",
+        },
+      });
+    },
+  },
+  {
+    id: "gs-call-crash",
+    group: "genserver",
+    primitive: "gen_server:call crash",
+    title: "server 在 call 中途死，client 拿到 DOWN 还活着",
+    erlang: "这就是为什么 call 必须 monitor：否则 client 会永远卡在 receive。",
+    run() {
+      const r = rt();
+      let err = "";
+      r.spawn(
+        "echo",
+        function* () {
+          yield fx.register("echo", L);
+          yield fx.receive((m) => m.t === "Call", L);
+          yield fx.sleep(99999, L);
+        },
+        undefined,
+        false,
+      );
+      r.flush();
+      const server = r.whereis("echo")!;
+      r.spawn(
+        "client",
+        function* () {
+          yield fx.register("client", L);
+          try {
+            yield* call(server, "ping", L, 50);
+          } catch (e) {
+            err = e instanceof Error ? e.message : String(e);
+          }
+          yield fx.sleep(99999, L);
+        },
+        undefined,
+        false,
+      );
+      r.flush();
+      r.kill(server, "killed");
+      r.flush();
+      r.step(60);
+      r.flush();
+      const client = r.whereis("client");
+      return eq(
+        "killed · client alive",
+        `${err || "no-err"} · ${r.processes.get(client!)?.alive ? "client alive" : "client dead"}`,
+        {
+          diagram: {
+            left: { name: "client", live: true },
+            right: { name: "echo", live: false },
+            signal: "DOWN → call fails",
+          },
+        },
+      );
+    },
+  },
+  {
+    id: "gs-cast",
+    group: "genserver",
+    primitive: "gen_server:cast",
+    title: "cast 不等待，发完即走",
+    erlang: "gen_server:cast(Pid, Msg) 是 send，没有 monitor，没有 reply。",
+    run() {
+      const r = rt();
+      const seen: unknown[] = [];
+      r.spawn(
+        "echo",
+        startLink("echo", {
+          init: () => null,
+          handleCall: (req, _f, state) => ({ reply: req, state }),
+          handleCast: (req, state) => {
+            seen.push(req);
+            return state;
+          },
+        }),
+        undefined,
+        false,
+      );
+      r.flush();
+      const pid = r.whereis("echo")!;
+      r.inject(pid, { t: "Cast", req: "nudge" });
+      r.flush();
+      return eq("[nudge]", show(seen));
+    },
+  },
 ];
 
 export function runCase(c: SemCase): SemResult {
@@ -1012,6 +1293,12 @@ export function runCase(c: SemCase): SemResult {
   }
 }
 
-export function runAll(): { id: string; result: SemResult }[] {
-  return CASES.map((c) => ({ id: c.id, result: runCase(c) }));
+export function otpDump(): { id: string; got: string; ok: boolean }[] {
+  return OTP_IDS.map((id) => {
+    const c = CASES.find((x) => x.id === id);
+    if (!c) return { id, got: "missing", ok: false };
+    const r = runCase(c);
+    return { id, got: r.got, ok: r.ok };
+  });
 }
+

@@ -15,3 +15,5 @@ dist
 *.tsbuildinfo
 AGENTS.md
 AGENTS.project.md
+erlang/brigade.tsv
+erlang/otp.tsv

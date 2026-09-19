@@ -120,7 +120,7 @@ export function BrigadeApp() {
   }
 
   return (
-    <div className="flex min-h-dvh flex-col bg-bg text-fg">
+    <div className="flex h-dvh flex-col overflow-hidden bg-bg text-fg">
       <header className="flex flex-col gap-3 border-b border-border px-4 py-3 sm:px-6 sm:py-4">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div className="min-w-0">
@@ -132,7 +132,7 @@ export function BrigadeApp() {
             </h1>
             <p className="mt-1 hidden max-w-xl text-sm leading-snug text-muted sm:block">
               {mode === "lab"
-                ? "厨房是可视化测试场。语义套件逐条对照 OTP：spawn / send / receive / mailbox / link / supervisor。"
+                ? "厨房是可视化测试场。语义套件逐条对照 OTP：spawn / send / receive / link / monitor / gen_server。"
                 : "后厨是一棵监督树。工单是消息，厨师是进程。灶台着火时不救厨师——supervisor 再 spawn 一个。"}
             </p>
           </div>
@@ -308,9 +308,9 @@ function Controls(props: {
 
 function Primitives() {
   const items = [
-    { id: "spawn", title: "spawn", body: "fork 一个 fiber，返回 Pid" },
-    { id: "send", title: "send", body: "异步投递到邮箱，不等待" },
-    { id: "receive", title: "receive", body: "按模式取出；不匹配的留下" },
+    { id: "spawn", title: "spawn", body: "新进程，独立 mailbox，返回 Pid" },
+    { id: "send", title: "send", body: "异步投递；发给已死 Pid 就丢掉" },
+    { id: "receive", title: "receive", body: "按模式扫描邮箱，不是 FIFO pop" },
     { id: "supervisor", title: "supervisor", body: "trap EXIT，按策略重启" },
   ] as const;
   return (
@@ -415,7 +415,16 @@ function MailboxPanel({ proc }: { proc: ProcSnap | null }) {
         {proc.mailbox.map((m, i) => (
           <li
             key={i}
-            className="rounded-sm bg-surface-2 px-3 py-2 font-mono text-xs text-fg"
+            className={cn(
+              "rounded-sm px-3 py-2 font-mono text-xs",
+              m.t === "EXIT"
+                ? "bg-crash/15 text-crash"
+                : m.t === "DOWN"
+                  ? "bg-warn/15 text-warn"
+                  : m.t === "Call" || m.t === "Reply" || m.t === "Cast"
+                    ? "bg-receive/15 text-receive"
+                    : "bg-surface-2 text-fg",
+            )}
           >
             {labelOf(m)}
           </li>
@@ -454,7 +463,10 @@ function opColor(op: TraceOp): string {
     case "drop":
       return "text-crash";
     case "unlink":
+    case "demonitor":
       return "text-muted";
+    case "monitor":
+      return "text-receive";
     default:
       return "text-subtle";
   }

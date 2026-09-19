@@ -2,15 +2,23 @@ import actorMl from "../../../ocaml/actor.ml?raw";
 import supervisorMl from "../../../ocaml/supervisor.ml?raw";
 import kitchenMl from "../../../ocaml/kitchen.ml?raw";
 import semanticsMl from "../../../ocaml/semantics.ml?raw";
+import genServerMl from "../../../ocaml/gen_server.ml?raw";
 
 export const SOURCES: Record<string, string> = {
   "actor.ml": actorMl,
   "supervisor.ml": supervisorMl,
   "kitchen.ml": kitchenMl,
   "semantics.ml": semanticsMl,
+  "gen_server.ml": genServerMl,
 };
 
-export const FILES = ["kitchen.ml", "supervisor.ml", "actor.ml", "semantics.ml"] as const;
+export const FILES = [
+  "kitchen.ml",
+  "supervisor.ml",
+  "actor.ml",
+  "gen_server.ml",
+  "semantics.ml",
+] as const;
 export type SourceFile = (typeof FILES)[number];
 
 /** loc tag → 1-based line in the corresponding file. Filled from the raw sources. */
@@ -56,13 +64,23 @@ mark("actor.ml", "p.alive <- false", "actor.ml:die");
 mark("actor.ml", 'retc = (fun () -> die p "normal")', "actor.ml:retc");
 mark("actor.ml", "| Exit_me   :", "actor.ml:exit");
 mark("actor.ml", "| Unlink    :", "actor.ml:unlink");
+mark("actor.ml", "| Monitor   :", "actor.ml:monitor");
+mark("actor.ml", "| Demonitor :", "actor.ml:demonitor");
+
 mark("semantics.ml", "receive fry", "semantics.ml:run");
+
+mark("gen_server.ml", "register name;", "gen_server.ml:register");
+mark("gen_server.ml", "let rec loop state", "gen_server.ml:loop");
+mark("gen_server.ml", "send from (Reply", "gen_server.ml:reply");
+mark("gen_server.ml", "let call pid req", "gen_server.ml:call");
+mark("gen_server.ml", "let r = monitor pid", "gen_server.ml:monitor");
 
 export function fileForLoc(loc: string | null | undefined): SourceFile {
   if (!loc) return "kitchen.ml";
   const hit = LOC_LINE[loc];
   if (hit) return hit.file;
   if (loc.startsWith("semantics")) return "semantics.ml";
+  if (loc.startsWith("gen_server")) return "gen_server.ml";
   if (loc.startsWith("supervisor")) return "supervisor.ml";
   if (loc.startsWith("actor")) return "actor.ml";
   return "kitchen.ml";
@@ -76,5 +94,6 @@ export function lineForLoc(loc: string | null | undefined): number | null {
 export function fileForProcess(name: string): SourceFile {
   if (name.endsWith("_sup")) return "supervisor.ml";
   if (name === "init") return "actor.ml";
+  if (name === "echo" || name === "client") return "gen_server.ml";
   return "kitchen.ml";
 }

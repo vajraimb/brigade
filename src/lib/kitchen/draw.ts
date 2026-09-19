@@ -382,6 +382,7 @@ function ticketLabel(msg: Msg): string {
   }
   if (msg.t === "StartChild") return msg.item.name.toUpperCase();
   if (msg.t === "EXIT") return "EXIT";
+  if (msg.t === "DOWN") return "DOWN";
   if (msg.t === "Crash") return "CRASH";
   return labelOf(msg).slice(0, 10);
 }

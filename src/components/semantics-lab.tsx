@@ -1,9 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   CASES,
   GROUP_LABEL,
+  OTP_IDS,
   runCase,
   type SemCase,
   type SemGroup,
@@ -11,7 +12,15 @@ import {
 } from "@/lib/actor/semantics";
 import { cn } from "@/lib/utils";
 
-const GROUPS: SemGroup[] = ["combo", "link", "mailbox", "supervisor", "primitive"];
+const GROUPS: SemGroup[] = [
+  "genserver",
+  "monitor",
+  "combo",
+  "link",
+  "mailbox",
+  "supervisor",
+  "primitive",
+];
 
 function runMap() {
   const m = new Map<string, SemResult>();
@@ -21,7 +30,12 @@ function runMap() {
 
 export function SemanticsLab() {
   const [results, setResults] = useState(runMap);
-  const [open, setOpen] = useState("combo-retry");
+  const [open, setOpen] = useState("gs-call");
+
+  useEffect(() => {
+    const el = document.querySelector(`[data-case="${open}"]`);
+    el?.scrollIntoView({ block: "center", behavior: "auto" });
+  }, [open]);
 
   const passed = useMemo(
     () => [...results.values()].filter((r) => r.ok).length,
@@ -29,17 +43,21 @@ export function SemanticsLab() {
   );
   const total = CASES.length;
   const allOk = passed === total;
+  const kernelOk = OTP_IDS.every((id) => results.get(id)?.ok);
 
   return (
     <div className="min-h-0 flex-1 overflow-auto">
       <Layers />
 
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3 sm:px-6">
-        <p className="flex items-baseline gap-2 font-mono text-sm tabular-nums">
+        <p className="flex flex-wrap items-baseline gap-2 font-mono text-sm tabular-nums">
           <span className={allOk ? "text-ok" : "text-crash"}>
             {passed}/{total}
           </span>
           <span className="text-muted">OTP 语义对照</span>
+          <span className={kernelOk ? "text-subtle" : "text-crash"}>
+            kernel {OTP_IDS.length}
+          </span>
         </p>
         <Button
           size="md"
@@ -63,13 +81,13 @@ export function SemanticsLab() {
                 const r = results.get(c.id);
                 const on = c.id === open;
                 return (
-                  <li key={c.id}>
+                  <li key={c.id} data-case={c.id}>
                     <button
                       type="button"
                       aria-expanded={on}
                       onClick={() => setOpen(on ? "" : c.id)}
                       className={cn(
-                        "flex h-12 w-full items-center gap-3 px-4 text-left text-sm sm:px-6",
+                        "flex min-h-12 w-full items-center gap-3 px-4 py-2 text-left text-sm sm:px-6",
                         on ? "text-fg" : "text-muted hover:text-fg",
                       )}
                     >
@@ -100,7 +118,7 @@ function Layers() {
   const rows = [
     {
       k: "Erlang",
-      v: "spawn  ·  send  ·  receive  ·  link  ·  exit  ·  supervisor",
+      v: "spawn · send · receive · link · monitor · exit · supervisor · gen_server",
     },
     {
       k: "Effects",
@@ -108,7 +126,7 @@ function Layers() {
     },
     {
       k: "Runtime",
-      v: "Pid · mailbox · link · lifecycle · supervision  —  Eio 只调度",
+      v: "Pid · mailbox · link · monitor · supervision  —  Switch ≠ link 图",
     },
   ] as const;
   return (
@@ -168,7 +186,7 @@ function LinkTrace({
   return (
     <div className="mt-3 flex items-stretch gap-2">
       <Node n={d.left} />
-      <div className="flex flex-1 flex-col items-center justify-center px-2">
+      <div className="flex min-w-0 flex-1 flex-col items-center justify-center px-2">
         <span className="h-px w-full bg-border-strong" />
         <p className="mt-1 whitespace-nowrap text-center font-mono text-xs text-crash">
           {d.signal}
@@ -228,6 +246,16 @@ function MailboxTrace({
   );
 }
 
+function chipTone(tag: string, hit: boolean) {
+  if (hit) return "bg-fg text-accent-fg";
+  if (tag.startsWith("EXIT")) return "bg-crash/15 text-crash";
+  if (tag.startsWith("DOWN")) return "bg-warn/15 text-warn";
+  if (tag.startsWith("Call") || tag.startsWith("Reply") || tag.startsWith("Cast")) {
+    return "bg-receive/15 text-receive";
+  }
+  return "bg-surface-2 text-muted";
+}
+
 function Row({ tags, taken }: { tags: string[]; taken?: string }) {
   let used = false;
   return (
@@ -235,18 +263,10 @@ function Row({ tags, taken }: { tags: string[]; taken?: string }) {
       {tags.map((tag, i) => {
         const hit = !used && taken != null && tag === taken;
         if (hit) used = true;
-        const system = tag.startsWith("EXIT");
         return (
           <li
             key={`${tag}-${i}`}
-            className={cn(
-              "rounded-sm px-2 py-1 font-mono text-xs",
-              hit
-                ? "bg-fg text-accent-fg"
-                : system
-                  ? "bg-crash/15 text-crash"
-                  : "bg-surface-2 text-muted",
-            )}
+            className={cn("rounded-sm px-2 py-1 font-mono text-xs", chipTone(tag, hit))}
           >
             {tag}
           </li>

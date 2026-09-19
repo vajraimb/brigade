@@ -9,7 +9,7 @@ import {
 } from "@/lib/kitchen/sources";
 
 const KW =
-  /^(let|rec|in|match|with|fun|function|type|open|module|struct|end|if|then|else|and|when|perform|failwith|ignore|Some|None|true|false|mutable|of|begin|include|sig|val|exception|raise|try|as|to|downto|do|done|for|while|not|mod|lsl|lsr|asr|land|lor|lxor)$/;
+  /^(let|rec|in|match|with|fun|function|functor|type|open|module|struct|end|if|then|else|and|when|perform|failwith|ignore|Some|None|true|false|mutable|of|begin|include|sig|val|exception|raise|try|as|to|downto|do|done|for|while|not|mod|lsl|lsr|asr|land|lor|lxor)$/;
 
 type Props = {
   loc: string | null;
@@ -35,7 +35,7 @@ export function SourceView({ loc, file, onFile }: Props) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex gap-1 px-3 pt-2">
+      <div className="flex flex-wrap gap-1 px-3 pt-2">
         {FILES.map((f) => (
           <button
             key={f}

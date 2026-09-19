@@ -19,6 +19,7 @@ export class Runtime {
   nextPid = 1;
   nextMsgId = 1;
   nextSeq = 1;
+  nextRef = 1;
   processes = new Map<Pid, Process>();
   names = new Map<string, Pid>();
   runQueue: Pid[] = [];
@@ -49,6 +50,8 @@ export class Runtime {
       alive: true,
       trapExit: false,
       links: new Set(),
+      monitors: new Map(),
+      watchedBy: new Map(),
       status: "runnable",
       parent,
       reductions: 0,
@@ -316,12 +319,33 @@ export class Runtime {
         if (proc.alive) this.runQueue.push(proc.pid);
         break;
       }
+      case "monitor": {
+        const ref = this.nextRef++;
+        proc.resumeValue = ref;
+        proc.status = "runnable";
+        this.runQueue.push(proc.pid);
+        this.installMonitor(proc, effect.pid, ref);
+        this.trace("monitor", proc, `monitor #${effect.pid} ref ${ref}`, {
+          loc: effect.loc,
+          to: effect.pid,
+        });
+        break;
+      }
+      case "demonitor": {
+        this.dropMonitor(proc, effect.ref, effect.flush === true);
+        proc.status = "runnable";
+        this.runQueue.push(proc.pid);
+        this.trace("demonitor", proc, `demonitor ref ${effect.ref}`, {
+          loc: effect.loc,
+        });
+        break;
+      }
     }
   }
 
   private tagMsg(msg: Msg): Msg {
     if ("id" in msg && typeof msg.id === "number" && msg.id > 0) return msg;
-    if (msg.t === "Crash" || msg.t === "Timeout" || msg.t === "EXIT") return msg;
+    if (msg.t === "Crash" || msg.t === "Timeout" || msg.t === "EXIT" || msg.t === "DOWN") return msg;
     const id = this.nextMsgId++;
     return { ...msg, id } as Msg;
   }
@@ -399,6 +423,47 @@ export class Runtime {
     }
   }
 
+  private installMonitor(watcher: Process, targetPid: Pid, ref: number) {
+    const dest = this.processes.get(targetPid);
+    if (!dest?.alive) {
+      this.arrive(watcher, {
+        t: "DOWN",
+        ref,
+        pid: targetPid,
+        reason: "noproc",
+      });
+      return;
+    }
+    watcher.monitors.set(ref, targetPid);
+    dest.watchedBy.set(ref, watcher.pid);
+  }
+
+  private dropMonitor(watcher: Process, ref: number, flush: boolean) {
+    const targetPid = watcher.monitors.get(ref);
+    watcher.monitors.delete(ref);
+    if (targetPid != null) this.processes.get(targetPid)?.watchedBy.delete(ref);
+    if (flush) {
+      watcher.mailbox = watcher.mailbox.filter(
+        (m) => !(m.t === "DOWN" && m.ref === ref),
+      );
+    }
+  }
+
+  private notifyMonitors(proc: Process, reason: string) {
+    const watchers = [...proc.watchedBy];
+    proc.watchedBy.clear();
+    for (const [ref, watcherPid] of watchers) {
+      const w = this.processes.get(watcherPid);
+      if (!w?.alive) continue;
+      w.monitors.delete(ref);
+      this.arrive(w, { t: "DOWN", ref, pid: proc.pid, reason });
+    }
+    for (const [ref, targetPid] of proc.monitors) {
+      this.processes.get(targetPid)?.watchedBy.delete(ref);
+    }
+    proc.monitors.clear();
+  }
+
   private linkPair(a: Pid, b: Pid) {
     this.processes.get(a)?.links.add(b);
     this.processes.get(b)?.links.add(a);
@@ -461,6 +526,7 @@ export class Runtime {
     this.trace(crashing ? "crash" : "exit", proc, `${proc.name} ${reason}`, {
       loc: crashing ? "actor.ml:die" : "actor.ml:retc",
     });
+    this.notifyMonitors(proc, reason);
     this.propagate(proc, reason);
   }
 
@@ -515,5 +581,13 @@ export function labelOf(msg: Msg): string {
       return "Timeout";
     case "Term":
       return msg.tag;
+    case "DOWN":
+      return `DOWN #${msg.pid} ${msg.reason}`;
+    case "Call":
+      return `Call ${String(msg.req)}`;
+    case "Reply":
+      return `Reply ${String(msg.reply)}`;
+    case "Cast":
+      return `Cast ${String(msg.req)}`;
   }
 }
