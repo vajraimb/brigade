@@ -3,6 +3,7 @@ import supervisorMl from "../../../ocaml/supervisor.ml?raw";
 import kitchenMl from "../../../ocaml/kitchen.ml?raw";
 import semanticsMl from "../../../ocaml/semantics.ml?raw";
 import genServerMl from "../../../ocaml/gen_server.ml?raw";
+import amrMl from "../../../ocaml/amr.ml?raw";
 
 export const SOURCES: Record<string, string> = {
   "actor.ml": actorMl,
@@ -10,6 +11,7 @@ export const SOURCES: Record<string, string> = {
   "kitchen.ml": kitchenMl,
   "semantics.ml": semanticsMl,
   "gen_server.ml": genServerMl,
+  "amr.ml": amrMl,
 };
 
 export const FILES = [
@@ -17,6 +19,7 @@ export const FILES = [
   "supervisor.ml",
   "actor.ml",
   "gen_server.ml",
+  "amr.ml",
   "semantics.ml",
 ] as const;
 export type SourceFile = (typeof FILES)[number];
@@ -75,10 +78,36 @@ mark("gen_server.ml", "let call pid req", "gen_server.ml:call");
 mark("gen_server.ml", "let r = monitor ~alias:true pid", "gen_server.ml:monitor");
 mark("gen_server.ml", "send_alias r (Reply", "gen_server.ml:reply");
 
+mark("amr.ml", 'let register_room () = register "room"', "amr.ml:room.register");
+mark("amr.ml", "let trap_room () = trap_exit true", "amr.ml:room.trap");
+mark("amr.ml", "let rec room_loop ()", "amr.ml:room.receive");
+mark("amr.ml", "Send env ->", "amr.ml:room.route");
+mark("amr.ml", "if delivery already Timed_out", "amr.ml:room.reply");
+mark("amr.ml", "ignore (monitor (whereis id))", "amr.ml:room.monitor");
+mark("amr.ml", "Stop_p id ->", "amr.ml:room.leave");
+mark("amr.ml", "let send_and_wait_ack env timeout", "amr.ml:wait_ack");
+mark("amr.ml", "let rec participant_loop spec", "amr.ml:p.register");
+mark("amr.ml", 'send pid (Hello spec)', "amr.ml:p.hello");
+mark("amr.ml", "Deliver _ | Leave _ | Crash", "amr.ml:p.receive");
+mark("amr.ml", 'send (whereis "room") (Ack', "amr.ml:p.ack");
+mark("amr.ml", "| Leave _ -> ()", "amr.ml:p.leave");
+mark("amr.ml", 'let register_psup () = register "participant_sup"', "amr.ml:psup.register");
+mark("amr.ml", "let trap_psup () = trap_exit true", "amr.ml:psup.trap");
+mark("amr.ml", "let rec psup_loop ()", "amr.ml:psup.receive");
+mark("amr.ml", "ignore (spawn ~name:id ~link:true", "amr.ml:psup.spawn");
+mark("amr.ml", 'exit_pid pid "shutdown"', "amr.ml:psup.stop");
+mark("amr.ml", "transient + abnormal", "amr.ml:psup.restart");
+mark("amr.ml", 'let register_log () = register "event_log"', "amr.ml:log.register");
+mark("amr.ml", "let rec log_loop ()", "amr.ml:log.receive");
+mark("amr.ml", "let timer delivery_id ms", "amr.ml:timer.sleep");
+mark("amr.ml", "let timer delivery_id ms", "amr.ml:room.timer");
+mark("amr.ml", '(match whereis "room" with', "amr.ml:p.whereis");
+
 export function fileForLoc(loc: string | null | undefined): SourceFile {
   if (!loc) return "kitchen.ml";
   const hit = LOC_LINE[loc];
   if (hit) return hit.file;
+  if (loc.startsWith("amr")) return "amr.ml";
   if (loc.startsWith("semantics")) return "semantics.ml";
   if (loc.startsWith("gen_server")) return "gen_server.ml";
   if (loc.startsWith("supervisor")) return "supervisor.ml";
@@ -91,7 +120,21 @@ export function lineForLoc(loc: string | null | undefined): number | null {
   return LOC_LINE[loc]?.line ?? null;
 }
 
+const AMR_NAMES = new Set([
+  "room",
+  "event_log",
+  "participant_sup",
+  "room_root_sup",
+  "planner",
+  "researcher",
+  "browser",
+  "reviewer",
+  "scout",
+]);
+
 export function fileForProcess(name: string): SourceFile {
+  if (name.startsWith("timer:")) return "amr.ml";
+  if (AMR_NAMES.has(name)) return "amr.ml";
   if (name.endsWith("_sup")) return "supervisor.ml";
   if (name === "init") return "actor.ml";
   if (name === "echo" || name === "client") return "gen_server.ml";

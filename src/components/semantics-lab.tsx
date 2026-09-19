@@ -11,9 +11,13 @@ import {
   type SemGroup,
   type SemResult,
 } from "@/lib/actor/semantics";
+import { AMR_CASES } from "@/lib/amr/semantics";
 import { cn } from "@/lib/utils";
 
+const ALL_CASES: SemCase[] = [...AMR_CASES, ...CASES];
+
 const GROUPS: SemGroup[] = [
+  "amr",
   "genserver",
   "monitor",
   "combo",
@@ -25,13 +29,13 @@ const GROUPS: SemGroup[] = [
 
 function runMap() {
   const m = new Map<string, SemResult>();
-  for (const c of CASES) m.set(c.id, runCase(c));
+  for (const c of ALL_CASES) m.set(c.id, runCase(c));
   return m;
 }
 
 export function SemanticsLab() {
   const [results, setResults] = useState(runMap);
-  const [open, setOpen] = useState("gs-call-timeout");
+  const [open, setOpen] = useState("amr-late-ack");
 
   useEffect(() => {
     const el = document.querySelector(`[data-case="${open}"]`);
@@ -42,7 +46,7 @@ export function SemanticsLab() {
     () => [...results.values()].filter((r) => r.ok).length,
     [results],
   );
-  const total = CASES.length;
+  const total = ALL_CASES.length;
   const allOk = passed === total;
   const kernelOk = OTP_IDS.every((id) => results.get(id)?.ok);
 
@@ -55,7 +59,7 @@ export function SemanticsLab() {
           <span className={allOk ? "text-ok" : "text-crash"}>
             {passed}/{total}
           </span>
-          <span className="text-muted">OTP 语义对照</span>
+          <span className="text-muted">语义对照</span>
           <span className={kernelOk ? "text-subtle" : "text-crash"}>
             kernel {OTP_IDS.length}
           </span>
@@ -78,7 +82,7 @@ export function SemanticsLab() {
               {GROUP_LABEL[g]}
             </p>
             <ul>
-              {CASES.filter((c) => c.group === g).map((c) => {
+              {ALL_CASES.filter((c) => c.group === g).map((c) => {
                 const r = results.get(c.id);
                 const on = c.id === open;
                 return (

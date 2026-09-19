@@ -14,6 +14,7 @@ import {
 const L = "semantics.ml:run";
 
 export type SemGroup =
+  | "amr"
   | "combo"
   | "primitive"
   | "mailbox"
@@ -49,6 +50,7 @@ export type SemCase = {
 };
 
 export const GROUP_LABEL: Record<SemGroup, string> = {
+  amr: "AMR",
   combo: "组合",
   monitor: "monitor",
   genserver: "gen_server",

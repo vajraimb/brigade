@@ -10,6 +10,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { SourceView } from "@/components/source-view";
 import { SemanticsLab } from "@/components/semantics-lab";
+import { AmrView } from "@/components/amr-view";
 import { KitchenSim } from "@/lib/kitchen/sim";
 import { KitchenView } from "@/lib/kitchen/draw";
 import { MENU, POISON, randomNormal } from "@/lib/kitchen/items";
@@ -19,7 +20,7 @@ import type { Pid, ProcSnap, Snapshot, TraceEvent, TraceOp } from "@/lib/actor/t
 import { cn } from "@/lib/utils";
 
 type Tab = "tree" | "mailbox" | "source" | "log";
-type Mode = "kitchen" | "lab";
+type Mode = "kitchen" | "amr" | "lab";
 
 const SPEEDS = [0.5, 1, 2] as const;
 
@@ -39,8 +40,8 @@ export function BrigadeApp() {
   const [tab, setTab] = useState<Tab>("tree");
   const [file, setFile] = useState<SourceFile>("kitchen.ml");
   const [auto, setAuto] = useState(true);
-  const [mode, setMode] = useState<Mode>("kitchen");
-  const modeRef = useRef<Mode>("kitchen");
+  const [mode, setMode] = useState<Mode>("amr");
+  const modeRef = useRef<Mode>("amr");
 
   selectedRef.current = selected;
   pausedRef.current = paused;
@@ -56,20 +57,22 @@ export function BrigadeApp() {
     const loop = (t: number) => {
       const raw = Math.min(100, t - last);
       last = t;
-      if (!pausedRef.current && modeRef.current === "kitchen") {
-        sim.tick(raw * speedRef.current);
-        trickle += raw * speedRef.current;
-        if (auto && trickle > 2800) {
-          trickle = 0;
-          sim.placeOrder(randomNormal());
+      if (modeRef.current === "kitchen") {
+        if (!pausedRef.current) {
+          sim.tick(raw * speedRef.current);
+          trickle += raw * speedRef.current;
+          if (auto && trickle > 2800) {
+            trickle = 0;
+            sim.placeOrder(randomNormal());
+          }
         }
-      }
-      const shot = sim.snapshot();
-      const canvas = canvasRef.current;
-      if (canvas) viewRef.current.draw(canvas, shot, selectedRef.current, raw, t);
-      if (t - ui > 90) {
-        ui = t;
-        setSnap(shot);
+        const shot = sim.snapshot();
+        const canvas = canvasRef.current;
+        if (canvas) viewRef.current.draw(canvas, shot, selectedRef.current, raw, t);
+        if (t - ui > 90) {
+          ui = t;
+          setSnap(shot);
+        }
       }
       raf = requestAnimationFrame(loop);
     };
@@ -132,8 +135,10 @@ export function BrigadeApp() {
             </h1>
             <p className="mt-1 hidden max-w-xl text-sm leading-snug text-muted sm:block">
               {mode === "lab"
-                ? "厨房是可视化测试场。语义套件逐条对照 OTP：spawn / send / receive / link / monitor / alias / gen_server。"
-                : "后厨是一棵监督树。工单是消息，厨师是进程。灶台着火时不救厨师——supervisor 再 spawn 一个。"}
+                ? "厨房是可视化测试场。语义套件逐条对照 OTP：spawn / send / receive / link / monitor / alias / gen_server。AMR 是同一运行时上的 agent 通信内核。"
+                : mode === "amr"
+                  ? "战情室是一棵监督树。信封是消息，参与者是进程。迟到的 ack 进不了已经关闭的投递。"
+                  : "后厨是一棵监督树。工单是消息，厨师是进程。灶台着火时不救厨师——supervisor 再 spawn 一个。"}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -164,10 +169,13 @@ export function BrigadeApp() {
           </div>
         </div>
         {mode === "kitchen" && <Primitives />}
+        {mode === "amr" && <AmrPrimitives />}
       </header>
 
       {mode === "lab" ? (
         <SemanticsLab />
+      ) : mode === "amr" ? (
+        <AmrView />
       ) : (
         <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
           <section className="relative min-h-[320px] flex-1 lg:min-h-0">
@@ -242,6 +250,7 @@ function ModeSwitch({
     <div className="flex rounded-md bg-surface p-0.5 shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
       {(
         [
+          ["amr", "战情"],
           ["kitchen", "厨房"],
           ["lab", "语义"],
         ] as const
@@ -259,6 +268,28 @@ function ModeSwitch({
         </button>
       ))}
     </div>
+  );
+}
+
+function AmrPrimitives() {
+  const items = [
+    { id: "room", title: "room", body: "任务会话。登记、路由、记下每条投递" },
+    { id: "envelope", title: "envelope", body: "信封和内容分开。系统事件也是 payload" },
+    { id: "ack", title: "ack", body: "Delivered ≠ Acked。ack 是处理完成" },
+    { id: "alias", title: "alias", body: "超时后地址作废，迟到的 ack 丢掉" },
+  ] as const;
+  return (
+    <ul className="hidden gap-2 overflow-x-auto pb-0.5 sm:flex lg:grid lg:grid-cols-4 lg:overflow-visible">
+      {items.map((it) => (
+        <li
+          key={it.id}
+          className="min-w-[9.5rem] shrink-0 rounded-md bg-surface px-3 py-2 shadow-[0_0_0_1px_rgba(255,255,255,0.06)] lg:min-w-0"
+        >
+          <p className="font-mono text-xs text-accent">{it.title}</p>
+          <p className="mt-0.5 text-xs leading-snug text-muted">{it.body}</p>
+        </li>
+      ))}
+    </ul>
   );
 }
 

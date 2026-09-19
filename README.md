@@ -65,6 +65,27 @@ The receive-marker is the other half of the same structure. BEAM sees `Ref = mon
 
 `gen_server:call` is: alias-monitor + send + selective receive of `Reply | DOWN`. On timeout, demonitor (alias dies), then one `after 0` scan for a Reply that already entered the queue. Anything later drops.
 
+## AMR
+
+BRIGADE AMR is an OTP-style supervised messaging runtime for agents, tools, and humans. The kitchen stays a visualization; the 战情 tab is the same runtime looking at a room.
+
+```
+room_root_sup
+├── room_server
+├── participant_sup
+│   ├── participant(agent:planner)     transient
+│   ├── participant(agent:researcher)  transient
+│   ├── participant(tool:browser)      transient
+│   └── participant(human:reviewer)    temporary
+└── event_log_worker                   permanent
+```
+
+A message is an envelope plus a delivery state machine: `Accepted → Routed → Delivered → Acked`, or `Timed_out` / `Cancelled` / `Failed`. Delivered is mailbox arrival; Acked is processing finished.
+
+`send_and_wait_ack` is `gen_server:call` pointed at the room: monitor `{alias, demonitor}`, send, receive Reply | DOWN. Once a delivery is terminal, a late ack is dropped — at the room, and at the caller's alias. That is the same stale-Pid rule.
+
+The 语义 tab has ten AMR cases, not in `OTP_IDS`. The kernel of the actor runtime does not change.
+
 ## Messages
 
 `type msg = ..` is an open variant. OTP messages are open: user terms, `EXIT`, `DOWN`, `Call`, `Reply`, `Cast`, `Timeout`. A closed sum would have to know the application. Kitchen tickets (`Ticket` / `Plated` / `Ready`) are one overlay; they share the mailbox with system messages. One `perform Receive` scans both.

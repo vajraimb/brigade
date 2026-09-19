@@ -14,7 +14,7 @@ export const Route = createRootRoute({
       {
         name: "description",
         content:
-          "OCaml Effect + Eio actor runtime: spawn, send, receive, supervisor — visualized as a late-night kitchen brigade.",
+          "OTP-style actor runtime for agents: room, participant, envelope, ack — and a kitchen so you can see it.",
       },
       { name: "theme-color", content: "#0b0c0d" },
     ],
