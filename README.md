@@ -15,7 +15,7 @@ Eio               Fiber.fork · Switch · Clock
 
 Eio does not leak into the API. `Pid ≠ worker function`. A cook that dies takes its mailbox with it; `whereis` returns the new Pid; send to the old one drops.
 
-The **语义** tab is the contract. Selective receive and `link`/`exit` are the two cases that prove this is not `await next_message()` and not `try worker() catch worker()`.
+The **语义** tab is the contract. Selective receive and `link`/`exit` are the two cases that prove this is not `await next_message()` and not `try worker() catch worker()`. Combination cases stack them: restart + skip EXIT + stale Pid, rest_for_one + dying mailboxes, intensity + parent tree.
 
 | Primitive | Expected |
 |---|---|

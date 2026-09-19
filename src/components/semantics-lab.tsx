@@ -11,7 +11,7 @@ import {
 } from "@/lib/actor/semantics";
 import { cn } from "@/lib/utils";
 
-const GROUPS: SemGroup[] = ["link", "mailbox", "supervisor", "primitive"];
+const GROUPS: SemGroup[] = ["combo", "link", "mailbox", "supervisor", "primitive"];
 
 function runMap() {
   const m = new Map<string, SemResult>();
@@ -21,7 +21,7 @@ function runMap() {
 
 export function SemanticsLab() {
   const [results, setResults] = useState(runMap);
-  const [open, setOpen] = useState("system-message");
+  const [open, setOpen] = useState("combo-retry");
 
   const passed = useMemo(
     () => [...results.values()].filter((r) => r.ok).length,

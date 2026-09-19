@@ -11,7 +11,7 @@ import {
 
 const L = "semantics.ml:run";
 
-export type SemGroup = "primitive" | "mailbox" | "link" | "supervisor";
+export type SemGroup = "combo" | "primitive" | "mailbox" | "link" | "supervisor";
 
 export type SemResult = {
   ok: boolean;
@@ -38,6 +38,7 @@ export type SemCase = {
 };
 
 export const GROUP_LABEL: Record<SemGroup, string> = {
+  combo: "组合",
   primitive: "原语",
   mailbox: "邮箱",
   link: "链接 / 退出",
@@ -806,6 +807,195 @@ export const CASES: SemCase[] = [
       ).length;
       const sofsAlive = r.processes.get(sofs)?.alive === true;
       return eq("0 still-up", `${aliveJobs} ${sofsAlive ? "still-up" : "sofs-dead"}`);
+    },
+  },
+  {
+    id: "combo-retry",
+    group: "combo",
+    primitive: "link + receive + trap + restart",
+    title: "重启时，receive 跳过 EXIT，旧 Pid 丢信",
+    erlang:
+      "observer trap+link 厨师。厨师挂 → supervisor spawn 新 Pid。mailbox [ticket, EXIT killed, ready] receive ready → [ticket, EXIT killed]。send #17 drops。",
+    run() {
+      const r = rt();
+      let taken = "";
+      r.spawn(
+        "sup",
+        supervise({
+          name: "sup",
+          specs: [{ id: "grill", start: park("grill"), restart: "permanent" }],
+        }),
+      );
+      r.flush();
+      const old = r.whereis("grill")!;
+      r.spawn(
+        "obs",
+        function* () {
+          yield fx.register("obs", L);
+          yield fx.trap_exit(true, L);
+          const g = (yield fx.whereis("grill", L)) as Pid | null;
+          if (g != null) yield fx.link(g, L);
+          yield fx.sleep(1, L);
+          const m = (yield fx.receive(
+            (x) => x.t === "Term" && x.tag === "ready",
+            L,
+          )) as Msg;
+          if (m.t === "Term") taken = m.tag;
+          yield fx.sleep(99999, L);
+        },
+        undefined,
+        false,
+      );
+      r.flush();
+      const obs = r.whereis("obs")!;
+      r.inject(obs, term("ticket"));
+      r.kill(old, "killed");
+      r.flush();
+      const neu = r.whereis("grill");
+      r.inject(obs, term("ready"));
+      const before = tagsOf(r, obs);
+      r.step(2);
+      r.flush();
+      const after = tagsOf(r, obs);
+      r.spawn(
+        "src",
+        function* () {
+          yield fx.send(old, term("late"), L);
+        },
+        undefined,
+        false,
+      );
+      r.flush();
+      const drops = r.events.filter((e) => e.op === "drop").length;
+      const okPid = neu != null && neu !== old;
+      return eq(
+        "ready · new pid · drop 1 · [ticket, EXIT killed]",
+        `${taken} · ${okPid ? "new pid" : "same pid"} · drop ${drops} · ${show(after)}`,
+        {
+          before,
+          after,
+          taken,
+          diagram: {
+            left: { name: "obs", live: true, trap: true },
+            right: { name: "grill", live: true },
+            signal: `${old} → ${neu ?? "?"}`,
+          },
+        },
+      );
+    },
+  },
+  {
+    id: "combo-rest-mail",
+    group: "combo",
+    primitive: "rest_for_one + mailbox",
+    title: "rest_for_one 关掉后面的，它们的邮箱一起烧掉",
+    erlang:
+      "A,B,C 各有一封信。B 挂：A 还在且信还在；B、C 邮箱随进程消失；B' C' 空邮箱。",
+    run() {
+      const r = rt();
+      r.spawn(
+        "sup",
+        supervise({
+          name: "sup",
+          strategy: "rest_for_one",
+          specs: [
+            { id: "a", start: park("a"), restart: "permanent" },
+            { id: "b", start: park("b"), restart: "permanent" },
+            { id: "c", start: park("c"), restart: "permanent" },
+          ],
+        }),
+      );
+      r.flush();
+      const a1 = r.whereis("a")!;
+      const b1 = r.whereis("b")!;
+      const c1 = r.whereis("c")!;
+      r.inject(a1, term("a1"));
+      r.inject(b1, term("b1"));
+      r.inject(c1, term("c1"));
+      r.flush();
+      r.kill(b1, "killed");
+      r.flush();
+      const a2 = r.whereis("a");
+      const b2 = r.whereis("b");
+      const c2 = r.whereis("c");
+      const aMail = tagsOf(r, a2);
+      const bOldMail = tagsOf(r, b1);
+      const cOldMail = tagsOf(r, c1);
+      const bNewMail = tagsOf(r, b2);
+      const cNewMail = tagsOf(r, c2);
+      const shape =
+        a2 === a1 &&
+        b2 !== b1 &&
+        c2 !== c1 &&
+        show(aMail) === "[a1]" &&
+        show(bOldMail) === "[]" &&
+        show(cOldMail) === "[]" &&
+        show(bNewMail) === "[]" &&
+        show(cNewMail) === "[]";
+      return eq(
+        "A keeps [a1]; B,C mail gone; B',C' empty",
+        shape
+          ? "A keeps [a1]; B,C mail gone; B',C' empty"
+          : `a ${show(aMail)} bOld ${show(bOldMail)} cOld ${show(cOldMail)} b' ${show(bNewMail)} c' ${show(cNewMail)}`,
+        {
+          before: ["a1", "b1", "c1"],
+          after: aMail,
+          step: "B crash → rest_for_one",
+        },
+      );
+    },
+  },
+  {
+    id: "combo-intensity-parent",
+    group: "combo",
+    primitive: "intensity + parent",
+    title: "下级 intensity 爆了，上一级把整棵子树拉起来",
+    erlang:
+      "line_sup maxR=2 被 boom 打穿。root trap 收到 EXIT，restart line_sup。新厨师是新 Pid。",
+    run() {
+      const r = rt();
+      r.spawn(
+        "root",
+        supervise({
+          name: "root",
+          intensity: 10,
+          specs: [
+            {
+              id: "line",
+              start: supervise({
+                name: "line",
+                intensity: 2,
+                period: 10_000,
+                specs: [{ id: "w", start: park("w"), restart: "permanent" }],
+              }),
+              restart: "permanent",
+            },
+          ],
+        }),
+      );
+      r.flush();
+      for (let i = 0; i < 3; i++) {
+        const w = r.whereis("w");
+        if (w != null) r.kill(w, "killed");
+        r.flush();
+      }
+      const root = r.whereis("root");
+      const lines = [...r.processes.values()].filter((p) => p.name === "line");
+      const workers = [...r.processes.values()].filter((p) => p.name === "w");
+      const rootLive = root != null && r.processes.get(root)?.alive === true;
+      const lineRestarted = lines.length >= 2;
+      const workerRestarted = workers.length >= 2;
+      return eq(
+        "root alive · line restarted · w restarted",
+        `${rootLive ? "root alive" : "root dead"} · ${lineRestarted ? "line restarted" : "line once"} · ${workerRestarted ? "w restarted" : "w once"}`,
+        {
+          diagram: {
+            left: { name: "root", live: rootLive, trap: true },
+            right: { name: "line", live: lines.some((p) => p.alive) },
+            signal: "intensity → restart tree",
+          },
+        },
+      );
     },
   },
 ];

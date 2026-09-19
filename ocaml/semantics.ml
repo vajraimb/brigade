@@ -77,3 +77,18 @@ type process = {
      transient   only abnormal
      temporary   never   (simple_one_for_one children)
 *)
+
+(* Combination.  Single rules being right is not enough.  Bugs hide
+   where they stack:
+
+     observer  trap_exit + link(grill)
+     grill     supervised, permanent
+     mailbox   [ticket; EXIT killed; ready]
+     receive   ready
+     mailbox   [ticket; EXIT killed]
+     whereis   "grill"  →  Pid 18
+     send      Pid 17   →  drop
+
+   rest_for_one + mailbox: later siblings die with their mail.
+   intensity + parent: the next supervisor restarts the whole subtree.
+*)
