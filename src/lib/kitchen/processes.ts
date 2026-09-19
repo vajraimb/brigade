@@ -1,12 +1,5 @@
-import { fx, type MenuItem, type Msg, type Pid, type ProcFn, type Station } from "../actor/types";
-
-type ChildSpec = {
-  id: string;
-  start: ProcFn;
-  restart: "permanent" | "transient" | "temporary";
-};
-
-type ChildRow = { spec: ChildSpec; pid: Pid; hist: number[] };
+import { fx, type MenuItem, type Msg, type Pid, type ProcFn, type Station } from "../actor/types.ts";
+import { simpleOneForOne, supervise } from "../actor/supervisor.ts";
 
 function cook(station: Station): ProcFn {
   return function* () {
@@ -87,77 +80,6 @@ function order(item: MenuItem): ProcFn {
   };
 }
 
-function supervise(opts: {
-  name: string;
-  specs: ChildSpec[];
-  intensity?: number;
-  period?: number;
-}): ProcFn {
-  const intensity = opts.intensity ?? 6;
-  const period = opts.period ?? 12000;
-  return function* () {
-    yield fx.register(opts.name, "supervisor.ml:register");
-    yield fx.trap_exit(true, "supervisor.ml:trap_exit");
-    const children: ChildRow[] = [];
-    for (const spec of opts.specs) {
-      const pid = (yield fx.spawn(
-        spec.id,
-        spec.start,
-        "supervisor.ml:spawn",
-        true,
-      )) as Pid;
-      children.push({ spec, pid, hist: [] });
-    }
-    while (true) {
-      const msg = (yield fx.receive(
-        (m) => m.t === "EXIT" || m.t === "Crash",
-        "supervisor.ml:receive",
-      )) as Msg;
-      if (msg.t === "Crash") throw new Error("supervisor abort");
-      if (msg.t !== "EXIT") continue;
-      const idx = children.findIndex((c) => c.pid === msg.pid);
-      if (idx < 0) continue;
-      const row = children[idx]!;
-      const skip =
-        row.spec.restart === "temporary" ||
-        (row.spec.restart === "transient" && msg.reason === "normal");
-      if (skip) {
-        children.splice(idx, 1);
-        continue;
-      }
-      const t = (yield fx.now("supervisor.ml:intensity")) as number;
-      row.hist = [t, ...row.hist.filter((h) => t - h <= period)];
-      if (row.hist.length > intensity) throw new Error("intensity exceeded");
-      const pid = (yield fx.spawn(
-        row.spec.id,
-        row.spec.start,
-        "supervisor.ml:restart",
-        true,
-      )) as Pid;
-      row.pid = pid;
-    }
-  };
-}
-
-function simpleOneForOne(name: string): ProcFn {
-  return function* () {
-    yield fx.register(name, "supervisor.ml:sofs.register");
-    yield fx.trap_exit(true, "supervisor.ml:sofs.trap_exit");
-    let n = 1;
-    while (true) {
-      const msg = (yield fx.receive(
-        (m) => m.t === "StartChild" || m.t === "EXIT" || m.t === "Crash",
-        "supervisor.ml:sofs.receive",
-      )) as Msg;
-      if (msg.t === "Crash") throw new Error("service abort");
-      if (msg.t === "StartChild") {
-        const id = `order-${n++}-${msg.item.id}`;
-        yield fx.spawn(id, order(msg.item), "supervisor.ml:sofs.spawn", true);
-      }
-    }
-  };
-}
-
 export function lineSup(): ProcFn {
   return supervise({
     name: "line_sup",
@@ -170,7 +92,10 @@ export function lineSup(): ProcFn {
 }
 
 export function serviceSup(): ProcFn {
-  return simpleOneForOne("service_sup");
+  return simpleOneForOne("service_sup", (item, n) => ({
+    id: `order-${n}-${item.id}`,
+    fn: order(item),
+  }));
 }
 
 export function brigade(): ProcFn {

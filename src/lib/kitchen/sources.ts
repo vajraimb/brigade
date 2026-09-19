@@ -1,14 +1,16 @@
 import actorMl from "../../../ocaml/actor.ml?raw";
 import supervisorMl from "../../../ocaml/supervisor.ml?raw";
 import kitchenMl from "../../../ocaml/kitchen.ml?raw";
+import semanticsMl from "../../../ocaml/semantics.ml?raw";
 
 export const SOURCES: Record<string, string> = {
   "actor.ml": actorMl,
   "supervisor.ml": supervisorMl,
   "kitchen.ml": kitchenMl,
+  "semantics.ml": semanticsMl,
 };
 
-export const FILES = ["kitchen.ml", "supervisor.ml", "actor.ml"] as const;
+export const FILES = ["kitchen.ml", "supervisor.ml", "actor.ml", "semantics.ml"] as const;
 export type SourceFile = (typeof FILES)[number];
 
 /** loc tag → 1-based line in the corresponding file. Filled from the raw sources. */
@@ -43,19 +45,23 @@ mark("supervisor.ml", "let spawn_one spec", "supervisor.ml:spawn");
 mark("supervisor.ml", "Exit _ | Crash", "supervisor.ml:receive");
 mark("supervisor.ml", "let t = now ()", "supervisor.ml:intensity");
 mark("supervisor.ml", "let child_pid = spawn_one spec", "supervisor.ml:restart");
+mark("supervisor.ml", 'exit_pid p "shutdown"', "supervisor.ml:shutdown");
 mark("supervisor.ml", 'simple_one_for_one ?(name = "sofs")', "supervisor.ml:sofs.register");
 mark("supervisor.ml", "trap_exit true;", "supervisor.ml:sofs.trap_exit");
 mark("supervisor.ml", "Start_child _ | Exit _ | Crash", "supervisor.ml:sofs.receive");
 mark("supervisor.ml", "ignore (spawn ~name:id", "supervisor.ml:sofs.spawn");
 
-mark("actor.ml", "| Spawn    :", "actor.ml:spawn");
+mark("actor.ml", "| Spawn     :", "actor.ml:spawn");
 mark("actor.ml", "p.alive <- false", "actor.ml:die");
 mark("actor.ml", 'retc = (fun () -> die p "normal")', "actor.ml:retc");
+mark("actor.ml", "| Exit_me   :", "actor.ml:exit");
+mark("semantics.ml", "receive grill", "semantics.ml:run");
 
 export function fileForLoc(loc: string | null | undefined): SourceFile {
   if (!loc) return "kitchen.ml";
   const hit = LOC_LINE[loc];
   if (hit) return hit.file;
+  if (loc.startsWith("semantics")) return "semantics.ml";
   if (loc.startsWith("supervisor")) return "supervisor.ml";
   if (loc.startsWith("actor")) return "actor.ml";
   return "kitchen.ml";

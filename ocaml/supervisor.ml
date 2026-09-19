@@ -56,9 +56,11 @@ let supervise ?(strategy = One_for_one)
                 else begin
                   (match strategy with
                    | One_for_all ->
-                       List.iter (fun (_, p, _) -> send p Crash) acc;
-                       List.iter (fun (_, p, _) -> send p Crash) rest
-                   | _ -> ());
+                       List.iter (fun (_, p, _) -> exit_pid p "shutdown") acc;
+                       List.iter (fun (_, p, _) -> exit_pid p "shutdown") rest
+                   | Rest_for_one ->
+                       List.iter (fun (_, p, _) -> exit_pid p "shutdown") rest
+                   | One_for_one | Simple_one_for_one -> ());
                   let child_pid = spawn_one spec in
                   restart ((spec, child_pid, hist) :: acc) rest
                 end

@@ -10,6 +10,9 @@ export type MenuItem = {
   poison: boolean;
 };
 
+/** Generic term for the OTP semantic suite. Kitchen messages stay separate. */
+export type Term = { t: "Term"; tag: string; payload?: unknown };
+
 export type Msg =
   | {
       t: "Ticket";
@@ -25,7 +28,8 @@ export type Msg =
   | { t: "Crash" }
   | { t: "EXIT"; pid: Pid; reason: string }
   | { t: "StartChild"; item: MenuItem; key: string }
-  | { t: "Timeout" };
+  | { t: "Timeout" }
+  | Term;
 
 export type ProcFn = () => Generator<Effect, void, unknown>;
 
@@ -39,7 +43,9 @@ export type Effect =
   | { op: "whereis"; name: string; loc: string }
   | { op: "link"; pid: Pid; loc: string }
   | { op: "trap_exit"; on: boolean; loc: string }
-  | { op: "now"; loc: string };
+  | { op: "now"; loc: string }
+  | { op: "exit"; reason: string; loc: string }
+  | { op: "exit_pid"; pid: Pid; reason: string; loc: string };
 
 export type ProcessStatus =
   | "runnable"
@@ -142,6 +148,10 @@ export type Snapshot = {
   lastLoc: string | null;
 };
 
+export function term(tag: string, payload?: unknown): Term {
+  return payload === undefined ? { t: "Term", tag } : { t: "Term", tag, payload };
+}
+
 export function E() {
   return {
     spawn: (name: string, fn: ProcFn, loc: string, link = true): Effect => ({
@@ -181,6 +191,13 @@ export function E() {
       loc,
     }),
     now: (loc: string): Effect => ({ op: "now", loc }),
+    exit: (reason: string, loc: string): Effect => ({ op: "exit", reason, loc }),
+    exit_pid: (pid: Pid, reason: string, loc: string): Effect => ({
+      op: "exit_pid",
+      pid,
+      reason,
+      loc,
+    }),
   };
 }
 

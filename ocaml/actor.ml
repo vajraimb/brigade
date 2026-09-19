@@ -2,7 +2,8 @@
    scheduled on Eio fibers.
 
    Each process runs inside a deep handler.  perform Spawn/Send/Receive
-   is the program; the handler is the runtime (mailboxes + fibers). *)
+   is the program; the handler is the runtime (mailboxes + fibers).
+   Eio stays under the handler.  The API is pid / mailbox / process. *)
 
 open Effect
 open Effect.Deep
@@ -11,17 +12,33 @@ type pid = int
 
 type msg = ..
 
+type 'msg mailbox = {
+  q : 'msg Queue.t;
+  cond : Eio.Condition.t;
+}
+
+type process = {
+  pid : pid;
+  name : string;
+  mailbox : msg mailbox;
+  mutable alive : bool;
+  mutable trap_exit : bool;
+  links : (pid, unit) Hashtbl.t;
+}
+
 type _ Effect.t +=
-  | Spawn    : { name : string; fn : unit -> unit; link : bool } -> pid t
-  | Send     : pid * msg -> unit t
-  | Receive  : { pred : msg -> bool; timeout : float option } -> msg t
-  | Self     : pid t
-  | Sleep    : float -> unit t
-  | Register : string -> unit t
-  | Whereis  : string -> pid option t
-  | Link     : pid -> unit t
+  | Spawn     : { name : string; fn : unit -> unit; link : bool } -> pid t
+  | Send      : pid * msg -> unit t
+  | Receive   : { pred : msg -> bool; timeout : float option } -> msg t
+  | Self      : pid t
+  | Sleep     : float -> unit t
+  | Register  : string -> unit t
+  | Whereis   : string -> pid option t
+  | Link      : pid -> unit t
   | Trap_exit : bool -> unit t
-  | Now      : float t
+  | Now       : float t
+  | Exit_me   : string -> unit t
+  | Signal    : pid * string -> unit t
 
 let spawn ?(name = "") ?(link = false) fn =
   perform (Spawn { name; fn; link })
@@ -36,19 +53,18 @@ let whereis name = perform (Whereis name)
 let link pid = perform (Link pid)
 let trap_exit on = perform (Trap_exit on)
 let now () = perform Now
+let exit_reason reason = perform (Exit_me reason)
+let exit_pid pid reason = perform (Signal (pid, reason))
 
 type msg +=
   | Exit of pid * string
   | Timeout
   | Crash
 
-(* ── Eio scheduler ─────────────────────────────────────────────── *)
+(* ── mailbox: selective receive, not FIFO pop ──────────────────── *)
 
 module Mailbox = struct
-  type t = {
-    q : msg Queue.t;
-    cond : Eio.Condition.t;
-  }
+  type 'a t = 'a mailbox
 
   let create () = { q = Queue.create (); cond = Eio.Condition.create () }
 
@@ -74,14 +90,7 @@ module Mailbox = struct
         take t pred
 end
 
-type proc = {
-  pid : pid;
-  name : string;
-  mailbox : Mailbox.t;
-  mutable alive : bool;
-  mutable trap_exit : bool;
-  links : (pid, unit) Hashtbl.t;
-}
+type proc = process
 
 module Scheduler (Env : sig
   val sw : Eio.Switch.t
@@ -122,6 +131,12 @@ struct
           | _ -> ())
         p.links
     end
+
+  let signal from dest reason =
+    if reason = "kill" then die dest "killed"
+    else if dest.trap_exit then deliver dest.pid (Exit (from.pid, reason))
+    else if reason = "normal" && dest.pid <> from.pid then ()
+    else die dest reason
 
   let rec handle (p : proc) (body : unit -> unit) : unit =
     match_with body ()
@@ -170,6 +185,13 @@ struct
                   continue k ())
           | Trap_exit on -> Some (fun k -> p.trap_exit <- on; continue k ())
           | Now -> Some (fun k -> continue k (Eio.Time.now Env.clock))
+          | Exit_me reason ->
+              Some (fun k -> die p reason; discontinue k (Failure reason))
+          | Signal (pid, reason) ->
+              Some (fun k ->
+                  Option.iter (fun q -> if q.alive then signal p q reason)
+                    (Hashtbl.find_opt procs pid);
+                  continue k ())
           | _ -> None)
       }
 

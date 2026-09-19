@@ -300,6 +300,16 @@ export class Runtime {
         proc.status = "runnable";
         this.runQueue.push(proc.pid);
         break;
+      case "exit":
+        this.exit(proc, effect.reason);
+        break;
+      case "exit_pid": {
+        const dest = this.processes.get(effect.pid);
+        if (dest?.alive) this.signalExit(proc, dest, effect.reason);
+        proc.status = "runnable";
+        if (proc.alive) this.runQueue.push(proc.pid);
+        break;
+      }
     }
   }
 
@@ -388,6 +398,21 @@ export class Runtime {
     this.processes.get(b)?.links.add(a);
   }
 
+  /** Erlang exit/2: trap_exit converts the signal to a message; otherwise die.
+   *  `normal` does not kill another process. `kill` always kills. */
+  private signalExit(from: Process, dest: Process, reason: string) {
+    if (reason === "kill") {
+      this.exit(dest, "killed");
+      return;
+    }
+    if (dest.trapExit) {
+      this.arrive(dest, { t: "EXIT", pid: from.pid, reason });
+      return;
+    }
+    if (reason === "normal" && dest.pid !== from.pid) return;
+    this.exit(dest, reason);
+  }
+
   private exit(proc: Process, reason: string) {
     if (!proc.alive) return;
     proc.alive = false;
@@ -473,5 +498,7 @@ export function labelOf(msg: Msg): string {
       return `StartChild ${msg.item.name}`;
     case "Timeout":
       return "Timeout";
+    case "Term":
+      return msg.tag;
   }
 }
