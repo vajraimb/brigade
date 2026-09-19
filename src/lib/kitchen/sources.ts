@@ -55,7 +55,8 @@ mark("actor.ml", "| Spawn     :", "actor.ml:spawn");
 mark("actor.ml", "p.alive <- false", "actor.ml:die");
 mark("actor.ml", 'retc = (fun () -> die p "normal")', "actor.ml:retc");
 mark("actor.ml", "| Exit_me   :", "actor.ml:exit");
-mark("semantics.ml", "receive grill", "semantics.ml:run");
+mark("actor.ml", "| Unlink    :", "actor.ml:unlink");
+mark("semantics.ml", "receive fry", "semantics.ml:run");
 
 export function fileForLoc(loc: string | null | undefined): SourceFile {
   if (!loc) return "kitchen.ml";

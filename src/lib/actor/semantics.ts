@@ -20,6 +20,12 @@ export type SemResult = {
   before?: string[];
   after?: string[];
   taken?: string;
+  step?: string;
+  diagram?: {
+    left: { name: string; live: boolean; trap?: boolean };
+    right: { name: string; live: boolean; trap?: boolean };
+    signal: string;
+  };
 };
 
 export type SemCase = {
@@ -67,7 +73,11 @@ function tagsOf(r: Runtime, pid: Pid | undefined): string[] {
   if (pid == null) return [];
   const p = r.processes.get(pid);
   if (!p) return [];
-  return p.mailbox.map((m) => (m.t === "Term" ? m.tag : m.t));
+  return p.mailbox.map((m) => {
+    if (m.t === "Term") return m.tag;
+    if (m.t === "EXIT") return `EXIT ${m.reason}`;
+    return m.t;
+  });
 }
 
 function park(name: string): ProcFn {
@@ -282,6 +292,45 @@ export const CASES: SemCase[] = [
     },
   },
   {
+    id: "stale-pid",
+    group: "mailbox",
+    primitive: "Pid",
+    title: "旧 Pid 不会把信转给新厨师",
+    erlang: "send Pid17 Msg 在 17 死后丢弃。whereis 才是 18。Pid ≠ worker function",
+    run() {
+      const r = rt();
+      r.spawn(
+        "sup",
+        supervise({
+          name: "sup",
+          specs: [{ id: "grill", start: park("grill"), restart: "permanent" }],
+        }),
+      );
+      r.flush();
+      const old = r.whereis("grill")!;
+      r.kill(old, "killed");
+      r.flush();
+      const neu = r.whereis("grill")!;
+      r.spawn(
+        "src",
+        function* () {
+          yield fx.send(old, term("late"), L);
+          yield fx.send(neu, term("fresh"), L);
+        },
+        undefined,
+        false,
+      );
+      r.flush();
+      const drops = r.events.filter((e) => e.op === "drop").length;
+      const mail = tagsOf(r, neu);
+      return eq(
+        "drop 1 · [fresh]",
+        `drop ${drops} · ${show(mail)}`,
+        { before: ["late → #17"], after: mail, step: "drop" },
+      );
+    },
+  },
+  {
     id: "link-cascade",
     group: "link",
     primitive: "link",
@@ -303,7 +352,47 @@ export const CASES: SemCase[] = [
       r.kill(a.pid, "killed");
       r.flush();
       const alive = [...r.processes.values()].filter((p) => p.alive).length;
-      return eq(0, alive);
+      return eq(0, alive, {
+        diagram: {
+          left: { name: "A", live: false },
+          right: { name: "B", live: false },
+          signal: "exit killed → cascade",
+        },
+      });
+    },
+  },
+  {
+    id: "normal-no-cascade",
+    group: "link",
+    primitive: "exit/1 normal",
+    title: "normal 退出不杀死未 trap 的链接",
+    erlang: "exit(normal) 通知链接，但不让对方死。{'EXIT', Pid, normal} 只在 trap 时进邮箱",
+    run() {
+      const r = rt();
+      r.spawn(
+        "a",
+        function* () {
+          yield fx.register("a", L);
+          yield fx.spawn("b", halt("b"), L, true);
+          yield fx.sleep(99999, L);
+        },
+        undefined,
+        false,
+      );
+      r.flush();
+      const a = r.whereis("a");
+      const b = [...r.processes.values()].find((p) => p.name === "b");
+      return eq(
+        "A alive, B normal",
+        `${r.processes.get(a!)?.alive ? "A alive" : "A dead"}, B ${b?.reason ?? "gone"}`,
+        {
+          diagram: {
+            left: { name: "A", live: r.processes.get(a!)?.alive === true },
+            right: { name: "B", live: false },
+            signal: "normal — no cascade",
+          },
+        },
+      );
     },
   },
   {
@@ -332,7 +421,143 @@ export const CASES: SemCase[] = [
       r.kill(r.whereis("w")!, "killed");
       r.flush();
       const sup = r.processes.get(r.whereis("sup")!)!;
-      return eq(["killed", true].join(" "), [reason, sup.alive].join(" "));
+      return eq(["killed", true].join(" "), [reason, sup.alive].join(" "), {
+        diagram: {
+          left: { name: "A", live: true, trap: true },
+          right: { name: "B", live: false },
+          signal: "{'EXIT', B, killed}",
+        },
+      });
+    },
+  },
+  {
+    id: "system-message",
+    group: "link",
+    primitive: "system message",
+    title: "EXIT 进同一只邮箱，receive 可以跳过它",
+    erlang:
+      "[grill, EXIT killed, fry]  receive fry  →  [grill, EXIT killed]  — 业务消息和退出信号走同一条 perform Receive",
+    run() {
+      const r = rt();
+      let taken = "";
+      r.spawn(
+        "box",
+        function* () {
+          yield fx.register("box", L);
+          yield fx.trap_exit(true, L);
+          yield fx.spawn("w", park("w"), L, true);
+          yield fx.sleep(1, L);
+          const m = (yield fx.receive(
+            (x) => x.t === "Term" && x.tag === "fry",
+            L,
+          )) as Msg;
+          if (m.t === "Term") taken = m.tag;
+          yield fx.sleep(99999, L);
+        },
+        undefined,
+        false,
+      );
+      r.flush();
+      const box = r.whereis("box")!;
+      r.inject(box, term("grill"));
+      r.kill(r.whereis("w")!, "killed");
+      r.flush();
+      r.inject(box, term("fry"));
+      const before = tagsOf(r, box);
+      r.step(2);
+      r.flush();
+      const after = tagsOf(r, box);
+      return eq(["grill", "EXIT killed"], after, {
+        before,
+        after,
+        taken,
+        diagram: {
+          left: { name: "A", live: true, trap: true },
+          right: { name: "B", live: false },
+          signal: "EXIT → mailbox",
+        },
+      });
+    },
+  },
+  {
+    id: "kill-untrappable",
+    group: "link",
+    primitive: "exit/2 kill",
+    title: "kill 不可 trap，目标一定死成 killed",
+    erlang: "exit(Pid, kill) 无视 trap_exit。目标以 killed 退出；链接上的 killed 才可以 trap",
+    run() {
+      const r = rt();
+      r.spawn(
+        "a",
+        function* () {
+          yield fx.register("a", L);
+          const b = (yield fx.spawn(
+            "b",
+            function* () {
+              yield fx.register("b", L);
+              yield fx.trap_exit(true, L);
+              yield fx.sleep(99999, L);
+            },
+            L,
+            false,
+          )) as Pid;
+          yield fx.exit_pid(b, "kill", L);
+          yield fx.sleep(99999, L);
+        },
+        undefined,
+        false,
+      );
+      r.flush();
+      const a = r.whereis("a");
+      const b = [...r.processes.values()].find((p) => p.name === "b");
+      return eq(
+        "A alive, B killed",
+        `${r.processes.get(a!)?.alive ? "A alive" : "A dead"}, B ${b?.reason ?? "gone"}`,
+        {
+          diagram: {
+            left: { name: "A", live: true },
+            right: { name: "B", live: false, trap: true },
+            signal: "kill (untrappable)",
+          },
+        },
+      );
+    },
+  },
+  {
+    id: "unlink-isolates",
+    group: "link",
+    primitive: "unlink",
+    title: "unlink 之后对方死不再传染",
+    erlang: "unlink(Pid) 双向解开。之后 B 崩溃，A 还活着",
+    run() {
+      const r = rt();
+      r.spawn(
+        "a",
+        function* () {
+          yield fx.register("a", L);
+          const b = (yield fx.spawn("b", park("b"), L, true)) as Pid;
+          yield fx.unlink(b, L);
+          yield fx.sleep(99999, L);
+        },
+        undefined,
+        false,
+      );
+      r.flush();
+      r.kill(r.whereis("b")!, "killed");
+      r.flush();
+      const a = r.whereis("a");
+      const b = [...r.processes.values()].find((p) => p.name === "b");
+      return eq(
+        "A alive, B dead",
+        `${r.processes.get(a!)?.alive ? "A alive" : "A dead"}, B ${b?.alive ? "alive" : "dead"}`,
+        {
+          diagram: {
+            left: { name: "A", live: true },
+            right: { name: "B", live: false },
+            signal: "unlinked",
+          },
+        },
+      );
     },
   },
   {

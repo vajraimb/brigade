@@ -1,6 +1,10 @@
 (* actor.ml — Erlang spawn / send / receive, as OCaml 5 effects,
    scheduled on Eio fibers.
 
+   Effect layer:  receive / send / wait  (perform, scan, continue k)
+   Runtime layer: Pid, mailbox, link, lifecycle, supervision
+   Eio:           Fiber.fork / Switch / Clock — scheduling only.
+
    Each process runs inside a deep handler.  perform Spawn/Send/Receive
    is the program; the handler is the runtime (mailboxes + fibers).
    Eio stays under the handler.  The API is pid / mailbox / process. *)
@@ -35,6 +39,7 @@ type _ Effect.t +=
   | Register  : string -> unit t
   | Whereis   : string -> pid option t
   | Link      : pid -> unit t
+  | Unlink    : pid -> unit t
   | Trap_exit : bool -> unit t
   | Now       : float t
   | Exit_me   : string -> unit t
@@ -51,6 +56,7 @@ let sleep dt = perform (Sleep dt)
 let register name = perform (Register name)
 let whereis name = perform (Whereis name)
 let link pid = perform (Link pid)
+let unlink pid = perform (Unlink pid)
 let trap_exit on = perform (Trap_exit on)
 let now () = perform Now
 let exit_reason reason = perform (Exit_me reason)
@@ -127,7 +133,7 @@ struct
           | Some q when q.alive ->
               Hashtbl.remove q.links p.pid;
               if q.trap_exit then deliver q.pid (Exit (p.pid, reason))
-              else die q reason
+              else if reason <> "normal" then die q reason
           | _ -> ())
         p.links
     end
@@ -181,6 +187,12 @@ struct
               Some (fun k ->
                   Hashtbl.replace p.links pid ();
                   Option.iter (fun q -> Hashtbl.replace q.links p.pid ())
+                    (Hashtbl.find_opt procs pid);
+                  continue k ())
+          | Unlink pid ->
+              Some (fun k ->
+                  Hashtbl.remove p.links pid;
+                  Option.iter (fun q -> Hashtbl.remove q.links p.pid)
                     (Hashtbl.find_opt procs pid);
                   continue k ())
           | Trap_exit on -> Some (fun k -> p.trap_exit <- on; continue k ())

@@ -11,7 +11,7 @@ import {
 } from "@/lib/actor/semantics";
 import { cn } from "@/lib/utils";
 
-const GROUPS: SemGroup[] = ["mailbox", "primitive", "link", "supervisor"];
+const GROUPS: SemGroup[] = ["link", "mailbox", "supervisor", "primitive"];
 
 function runMap() {
   const m = new Map<string, SemResult>();
@@ -21,7 +21,7 @@ function runMap() {
 
 export function SemanticsLab() {
   const [results, setResults] = useState(runMap);
-  const [open, setOpen] = useState("selective-receive");
+  const [open, setOpen] = useState("system-message");
 
   const passed = useMemo(
     () => [...results.values()].filter((r) => r.ok).length,
@@ -104,11 +104,11 @@ function Layers() {
     },
     {
       k: "Effects",
-      v: "perform Receive  →  handler 扫邮箱，continue 续体",
+      v: "receive / send / wait  —  perform → scan mailbox → continue k",
     },
     {
-      k: "Eio",
-      v: "Fiber.fork  ·  Switch  ·  Clock  — 藏在 handler 下面",
+      k: "Runtime",
+      v: "Pid · mailbox · link · lifecycle · supervision  —  Eio 只调度",
     },
   ] as const;
   return (
@@ -134,11 +134,13 @@ function CaseBody({
 }) {
   return (
     <div className="px-4 pb-5 sm:px-6">
+      {result.diagram && <LinkTrace d={result.diagram} />}
       {result.before && (
         <MailboxTrace
           before={result.before}
           after={result.after ?? []}
           taken={result.taken}
+          step={result.step}
         />
       )}
       <p className="mt-4 text-sm leading-relaxed text-muted">{c.erlang}</p>
@@ -158,24 +160,69 @@ function CaseBody({
   );
 }
 
+function LinkTrace({
+  d,
+}: {
+  d: NonNullable<SemResult["diagram"]>;
+}) {
+  return (
+    <div className="mt-3 flex items-stretch gap-2">
+      <Node n={d.left} />
+      <div className="flex flex-1 flex-col items-center justify-center px-2">
+        <span className="h-px w-full bg-border-strong" />
+        <p className="mt-1 whitespace-nowrap text-center font-mono text-xs text-crash">
+          {d.signal}
+        </p>
+      </div>
+      <Node n={d.right} />
+    </div>
+  );
+}
+
+function Node({
+  n,
+}: {
+  n: { name: string; live: boolean; trap?: boolean };
+}) {
+  return (
+    <div
+      className={cn(
+        "w-20 shrink-0 rounded-sm px-2 py-2 text-center",
+        n.live ? "bg-surface-2" : "bg-crash/15",
+      )}
+    >
+      <p className="font-mono text-xs text-fg">{n.name}</p>
+      <p className={cn("mt-0.5 font-mono text-xs", n.live ? "text-ok" : "text-crash")}>
+        {n.live ? "alive" : "dead"}
+      </p>
+      {n.trap ? <p className="mt-0.5 font-mono text-xs text-subtle">trap</p> : null}
+    </div>
+  );
+}
+
 function MailboxTrace({
   before,
   after,
   taken,
+  step,
 }: {
   before: string[];
   after: string[];
   taken?: string;
+  step?: string;
 }) {
   return (
     <div className="mt-4">
       <p className="font-mono text-xs text-subtle">mailbox</p>
       <Row tags={before} taken={taken} />
-      {taken ? (
-        <p className="mt-2 font-mono text-xs text-receive">receive {taken}</p>
-      ) : (
-        <p className="mt-2 font-mono text-xs text-crash">exit</p>
-      )}
+      <p
+        className={cn(
+          "mt-2 font-mono text-xs",
+          taken ? "text-receive" : "text-crash",
+        )}
+      >
+        {taken ? `receive ${taken}` : (step ?? "exit")}
+      </p>
       <Row tags={after} />
     </div>
   );
@@ -188,12 +235,17 @@ function Row({ tags, taken }: { tags: string[]; taken?: string }) {
       {tags.map((tag, i) => {
         const hit = !used && taken != null && tag === taken;
         if (hit) used = true;
+        const system = tag.startsWith("EXIT");
         return (
           <li
             key={`${tag}-${i}`}
             className={cn(
               "rounded-sm px-2 py-1 font-mono text-xs",
-              hit ? "bg-fg text-accent-fg" : "bg-surface-2 text-muted",
+              hit
+                ? "bg-fg text-accent-fg"
+                : system
+                  ? "bg-crash/15 text-crash"
+                  : "bg-surface-2 text-muted",
             )}
           >
             {tag}

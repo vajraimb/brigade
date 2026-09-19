@@ -453,6 +453,8 @@ function opColor(op: TraceOp): string {
     case "crash":
     case "drop":
       return "text-crash";
+    case "unlink":
+      return "text-muted";
     default:
       return "text-subtle";
   }

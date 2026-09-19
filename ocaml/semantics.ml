@@ -7,6 +7,8 @@
  *     Erlang  spawn / send / receive / link / exit / supervisor
  *        │
  *     Effects perform Receive → handler scans mailbox, continues k
+ *        │     (receive / send / wait belong here)
+ *     Runtime Pid · mailbox · link · lifecycle · supervision
  *        │
  *     Eio     Fiber.fork / Switch / Clock
  *)
@@ -42,7 +44,22 @@ type process = {
 *)
 
 (* Mailbox dies with the pid.  A restarted cook is Pid 18, empty
-   mailbox.  whereis "grill" → 18.  The in-flight ticket to 17 drops. *)
+   mailbox.  whereis "grill" → 18.  The in-flight ticket to 17 drops.
+   Never silently forward to the new worker. *)
+
+(* link + exit.  The mailbox carries both business terms and system
+   messages.  perform Receive is one scan over both.
+
+     A ──link── B     trap_exit = true on A
+     B exits
+     mailbox A  [grill; EXIT killed; fry]
+     receive fry
+     mailbox A  [grill; EXIT killed]
+
+   normal: linked partner does not die.
+   kill:   untrappable; dest dies as killed.
+   unlink: bidirectional; cascade stops.
+*)
 
 (* Supervision.  rest_for_one is the one people skip:
 

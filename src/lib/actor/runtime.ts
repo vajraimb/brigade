@@ -290,6 +290,12 @@ export class Runtime {
         this.runQueue.push(proc.pid);
         this.trace("link", proc, `link #${effect.pid}`, { loc: effect.loc });
         break;
+      case "unlink":
+        this.unlinkPair(proc.pid, effect.pid);
+        proc.status = "runnable";
+        this.runQueue.push(proc.pid);
+        this.trace("unlink", proc, `unlink #${effect.pid}`, { loc: effect.loc });
+        break;
       case "trap_exit":
         proc.trapExit = effect.on;
         proc.status = "runnable";
@@ -398,6 +404,11 @@ export class Runtime {
     this.processes.get(b)?.links.add(a);
   }
 
+  private unlinkPair(a: Pid, b: Pid) {
+    this.processes.get(a)?.links.delete(b);
+    this.processes.get(b)?.links.delete(a);
+  }
+
   /** Erlang exit/2: trap_exit converts the signal to a message; otherwise die.
    *  `normal` does not kill another process. `kill` always kills. */
   private signalExit(from: Process, dest: Process, reason: string) {
@@ -411,6 +422,21 @@ export class Runtime {
     }
     if (reason === "normal" && dest.pid !== from.pid) return;
     this.exit(dest, reason);
+  }
+
+  private propagate(from: Process, reason: string) {
+    const linked = [...from.links];
+    from.links.clear();
+    for (const otherPid of linked) {
+      const other = this.processes.get(otherPid);
+      if (!other?.alive) continue;
+      other.links.delete(from.pid);
+      if (other.trapExit) {
+        this.arrive(other, { t: "EXIT", pid: from.pid, reason });
+      } else if (reason !== "normal") {
+        this.exit(other, reason);
+      }
+    }
   }
 
   private exit(proc: Process, reason: string) {
@@ -435,18 +461,7 @@ export class Runtime {
     this.trace(crashing ? "crash" : "exit", proc, `${proc.name} ${reason}`, {
       loc: crashing ? "actor.ml:die" : "actor.ml:retc",
     });
-    const linked = [...proc.links];
-    proc.links.clear();
-    for (const otherPid of linked) {
-      const other = this.processes.get(otherPid);
-      if (!other?.alive) continue;
-      other.links.delete(proc.pid);
-      if (other.trapExit) {
-        this.arrive(other, { t: "EXIT", pid: proc.pid, reason });
-      } else {
-        this.exit(other, reason);
-      }
-    }
+    this.propagate(proc, reason);
   }
 
   private gcDead() {

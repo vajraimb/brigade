@@ -42,6 +42,7 @@ export type Effect =
   | { op: "register"; name: string; loc: string }
   | { op: "whereis"; name: string; loc: string }
   | { op: "link"; pid: Pid; loc: string }
+  | { op: "unlink"; pid: Pid; loc: string }
   | { op: "trap_exit"; on: boolean; loc: string }
   | { op: "now"; loc: string }
   | { op: "exit"; reason: string; loc: string }
@@ -97,6 +98,7 @@ export type TraceOp =
   | "exit"
   | "register"
   | "link"
+  | "unlink"
   | "drop";
 
 export type TraceEvent = {
@@ -185,6 +187,7 @@ export function E() {
       loc,
     }),
     link: (pid: Pid, loc: string): Effect => ({ op: "link", pid, loc }),
+    unlink: (pid: Pid, loc: string): Effect => ({ op: "unlink", pid, loc }),
     trap_exit: (on: boolean, loc: string): Effect => ({
       op: "trap_exit",
       on,
