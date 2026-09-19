@@ -82,12 +82,12 @@ mark("amr.ml", 'let register_room () = register "room"', "amr.ml:room.register")
 mark("amr.ml", "let trap_room () = trap_exit true", "amr.ml:room.trap");
 mark("amr.ml", "let rec room_loop ()", "amr.ml:room.receive");
 mark("amr.ml", "Send env ->", "amr.ml:room.route");
-mark("amr.ml", "if delivery already Timed_out", "amr.ml:room.reply");
+mark("amr.ml", "if generation <> delivery.generation, drop stale", "amr.ml:room.reply");
 mark("amr.ml", "ignore (monitor (whereis id))", "amr.ml:room.monitor");
 mark("amr.ml", "Stop_p id ->", "amr.ml:room.leave");
 mark("amr.ml", "let send_and_wait_ack env timeout", "amr.ml:wait_ack");
 mark("amr.ml", "let rec participant_loop spec", "amr.ml:p.register");
-mark("amr.ml", 'send pid (Hello spec)', "amr.ml:p.hello");
+mark("amr.ml", "send pid (Hello (spec, generation))", "amr.ml:p.hello");
 mark("amr.ml", "Deliver _ | Leave _ | Crash", "amr.ml:p.receive");
 mark("amr.ml", 'send (whereis "room") (Ack', "amr.ml:p.ack");
 mark("amr.ml", "| Leave _ -> ()", "amr.ml:p.leave");

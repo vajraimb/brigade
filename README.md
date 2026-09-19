@@ -80,11 +80,26 @@ room_root_sup
 └── event_log_worker                   permanent
 ```
 
-A message is an envelope plus a delivery state machine: `Accepted → Routed → Delivered → Acked`, or `Timed_out` / `Cancelled` / `Failed`. Delivered is mailbox arrival; Acked is processing finished.
+A message is an envelope plus a delivery state machine: `Accepted → Routed → Delivered → Acked` / `Rejected`, or `Timed_out` / `Cancelled` / `Failed`. Delivered is mailbox arrival; Acked is processing finished.
 
-`send_and_wait_ack` is `gen_server:call` pointed at the room: monitor `{alias, demonitor}`, send, receive Reply | DOWN. Once a delivery is terminal, a late ack is dropped — at the room, and at the caller's alias. That is the same stale-Pid rule.
+`send_and_wait_ack` is `gen_server:call` pointed at the room: monitor `{alias, demonitor}`, send, receive Reply | DOWN. A late ack is dropped by two independent gates:
 
-The 语义 tab has ten AMR cases, not in `OTP_IDS`. The kernel of the actor runtime does not change.
+1. **Room delivery gate.** A terminal `delivery_id` rejects every later `Ack`. The event is `drop`. The state does not move. The room does not sweep the caller mailbox.
+2. **Caller alias gate.** Timeout or cancel deactivates the alias. A Reply addressed to it is dropped like a send to a dead Pid. The alias does not replace the delivery state machine.
+
+An Ack is valid only from the recipient's current generation. After a restart the old Pid's ack cannot confirm a delivery that belonged to it, and cannot confirm a delivery that belongs to the new incarnation.
+
+### Invariants
+
+1. A delivery reaches exactly one terminal state.
+2. Delivered means mailbox arrival; Acked means callback-confirmed completion.
+3. An Ack is valid only from the recipient's current Pid/generation.
+4. Terminal deliveries never transition again.
+5. Timeout/cancel deactivates the waiting alias before exposing completion.
+6. A participant DOWN fails every pending delivery addressed to that Pid.
+7. Room events describe runtime facts; they do not replace delivery state.
+
+The 语义 tab has sixteen AMR cases, not in `OTP_IDS`. The kernel of the actor runtime does not change.
 
 ## Messages
 

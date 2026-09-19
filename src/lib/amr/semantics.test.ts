@@ -3,8 +3,8 @@ import { test } from "node:test";
 import { runCase } from "../actor/semantics.ts";
 import { AMR_CASES } from "./semantics.ts";
 
-test("AMR suite is 10 cases", () => {
-  assert.equal(AMR_CASES.length, 10);
+test("AMR suite is 16 cases", () => {
+  assert.equal(AMR_CASES.length, 16);
 });
 
 for (const c of AMR_CASES) {

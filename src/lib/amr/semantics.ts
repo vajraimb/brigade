@@ -3,6 +3,7 @@ import { fx, type Pid } from "../actor/types.ts";
 import type { SemCase, SemResult } from "../actor/semantics.ts";
 import {
   bootRoom,
+  injectAck,
   injectCancel,
   injectJoin,
   injectLeave,
@@ -132,6 +133,28 @@ export const AMR_CASES: SemCase[] = [
     },
   },
   {
+    id: "amr-delivery-vs-ack",
+    group: "amr",
+    primitive: "delivered ≠ acked",
+    path: "amr/delivery/delivered",
+    title: "放进 mailbox 还不是处理完成",
+    erlang:
+      "hang 的 participant 收到信封就停。flush 之后 state = Delivered，不是 Acked。callback 没跑完，不能当成功。",
+    run() {
+      const { r, store } = setup([
+        { id: "a", kind: "agent", behavior: "ack" },
+        { id: "b", kind: "agent", behavior: "hang" },
+      ]);
+      injectSend(r, { from: "a", to: "b", payload: HI, ackRequired: true, deadlineMs: 400 });
+      r.flush();
+      const d = lastDelivery(store);
+      return eq("delivered", d?.state, {
+        after: states(store),
+        step: "mailbox arrival, no callback",
+      });
+    },
+  },
+  {
     id: "amr-broadcast",
     group: "amr",
     primitive: "broadcast",
@@ -183,13 +206,55 @@ export const AMR_CASES: SemCase[] = [
     },
   },
   {
+    id: "amr-recipient-down",
+    group: "amr",
+    primitive: "pending → recipient_down",
+    path: "amr/delivery/recipient-down",
+    title: "收件进程死，pending delivery 立刻 Failed，caller 不等",
+    erlang:
+      "DOWN 扫该 Pid 上所有非终态 delivery，原子转入 Failed recipient_down，并向等待 alias 回 down。不是只记一条系统事件。",
+    run() {
+      const { r, store } = setup([
+        { id: "a", kind: "agent", behavior: "ack" },
+        { id: "b", kind: "agent", behavior: "hang" },
+      ]);
+      let result = "";
+      r.spawn(
+        "client",
+        function* () {
+          yield fx.register("client", L);
+          result = yield* sendAndWaitAck({ from: "a", to: "b", payload: HI, deadlineMs: 2000 }, 2000, L);
+          yield fx.sleep(99999, L);
+        },
+        undefined,
+        false,
+      );
+      r.flush();
+      const pid = r.whereis("b")!;
+      r.kill(pid, "killed");
+      r.flush();
+      const d = lastDelivery(store);
+      return eq(
+        "failed · recipient_down · down",
+        `${d?.state} · ${d?.reason} · ${result || "no-result"}`,
+        {
+          diagram: {
+            left: { name: "client", live: true },
+            right: { name: "b", live: false },
+            signal: "DOWN → Failed",
+          },
+        },
+      );
+    },
+  },
+  {
     id: "amr-restart",
     group: "amr",
     primitive: "transient restart",
     path: "amr/participant/restart",
     title: "agent 异常退出后被拉起，room 收到 Restarted",
     erlang:
-      "agent/tool 是 transient：异常重启，normal 不重启。hello 带着新 Pid，room 记 Restarted。",
+      "agent/tool 是 transient：异常重启，normal 不重启。hello 带着新 Pid 和新 generation，room 记 Restarted。",
     run() {
       const { r, store } = pair();
       const before = r.whereis("b")!;
@@ -198,10 +263,10 @@ export const AMR_CASES: SemCase[] = [
       const after = r.whereis("b");
       const row = store.participants.get("b");
       return eq(
-        "alive · restarted · new-pid",
+        "alive · restarted · new-pid · g2",
         `${row?.presence} · ${names(store, "restarted")[0] ?? "none"} · ${
           after != null && after !== before ? "new-pid" : `same:${after}`
-        }`,
+        } · g${row?.generation}`,
         {
           diagram: {
             left: { name: "psup", live: true },
@@ -247,7 +312,7 @@ export const AMR_CASES: SemCase[] = [
     path: "amr/delivery/late-ack",
     title: "超时后迟到的 ack 必须被丢掉",
     erlang:
-      "delivery 一旦 Timed_out / Cancelled / Failed，迟到 ack 不能再变成 Acked。send_and_wait_ack 的 alias 同时失活，Reply 进不了 caller 邮箱。两层同一条规则：死地址丢信。",
+      "两道独立防线。Room gate：终态 delivery 拒绝一切 Ack 推进，记 drop。Caller alias gate：timeout 后 alias 失活，Reply 进不了 caller 邮箱。room 不清 caller 邮箱；alias 也不代替 delivery 状态机。",
     run() {
       const { r, store } = setup([
         { id: "a", kind: "agent", behavior: "ack" },
@@ -294,6 +359,78 @@ export const AMR_CASES: SemCase[] = [
     },
   },
   {
+    id: "amr-stale-ack",
+    group: "amr",
+    primitive: "ack generation",
+    path: "amr/delivery/stale-ack",
+    title: "只有当前 incarnation 有资格 ack",
+    erlang:
+      "Ack 带着 participant generation。与 delivery 上记下的 generation 不一致 → drop，状态停在 Delivered。旧 fiber / 旧 Pid 不能确认当前投递。",
+    run() {
+      const { r, store } = setup([
+        { id: "a", kind: "agent", behavior: "ack" },
+        { id: "b", kind: "agent", behavior: "hang" },
+      ]);
+      injectSend(r, { from: "a", to: "b", payload: HI, ackRequired: true, deadlineMs: 400 });
+      r.flush();
+      const d = lastDelivery(store)!;
+      injectAck(r, { deliveryId: d.id, from: "b", generation: 0, outcome: "ok" });
+      r.flush();
+      const afterBad = lastDelivery(store)?.state;
+      injectAck(r, { deliveryId: d.id, from: "b", generation: d.generation, outcome: "ok" });
+      r.flush();
+      const afterGood = lastDelivery(store)?.state;
+      return eq(
+        "delivered · acked · drop",
+        `${afterBad} · ${afterGood} · ${store.events.some((e) => e.name === "drop") ? "drop" : "no-drop"}`,
+        {
+          step: "wrong generation dropped",
+          diagram: {
+            left: { name: "b g0", live: false },
+            right: { name: "b g1", live: true },
+            signal: "stale ack drop",
+          },
+        },
+      );
+    },
+  },
+  {
+    id: "amr-restart-stale-ack",
+    group: "amr",
+    primitive: "restart stale ack",
+    path: "amr/delivery/restart-stale-ack",
+    title: "重启后旧实例的 ack 不能复活 delivery",
+    erlang:
+      "DOWN 先把该 Pid 的 pending 标 Failed。旧 generation 的 ack 打在终态上，room gate 丢掉。新 incarnation 是新 Pid、新 generation，不能认领旧 delivery。",
+    run() {
+      const { r, store } = setup([
+        { id: "a", kind: "agent", behavior: "ack" },
+        { id: "b", kind: "agent", behavior: "hang" },
+      ]);
+      injectSend(r, { from: "a", to: "b", payload: HI, ackRequired: true, deadlineMs: 400 });
+      r.flush();
+      const d = lastDelivery(store)!;
+      const oldGen = d.generation;
+      const pid = r.whereis("b")!;
+      r.kill(pid, "killed");
+      r.flush();
+      injectAck(r, { deliveryId: d.id, from: "b", generation: oldGen, outcome: "ok" });
+      r.flush();
+      const row = store.participants.get("b");
+      return eq(
+        "failed · recipient_down · drop · g2",
+        `${d.state} · ${d.reason} · ${store.events.some((e) => e.name === "drop") ? "drop" : "no-drop"} · g${row?.generation}`,
+        {
+          diagram: {
+            left: { name: "b g1", live: false },
+            right: { name: "b g2", live: true },
+            signal: "old ack ≠ new world",
+          },
+        },
+      );
+    },
+  },
+  {
     id: "amr-cancel",
     group: "amr",
     primitive: "cancel",
@@ -327,13 +464,71 @@ export const AMR_CASES: SemCase[] = [
     },
   },
   {
+    id: "amr-human-gate",
+    group: "amr",
+    primitive: "human reject",
+    path: "amr/delivery/rejected",
+    title: "human 可以显式 Rejected，留下审计事件",
+    erlang:
+      "gate 行为不自动 ack。outcome = rejected 把 delivery 推到终态 Rejected，不是 Failed。这是人的决定，不是路由失败。",
+    run() {
+      const { r, store } = setup([
+        { id: "a", kind: "agent", behavior: "ack" },
+        { id: "h", kind: "human", behavior: "gate" },
+      ]);
+      injectSend(r, { from: "a", to: "h", payload: HI, ackRequired: true, deadlineMs: 400 });
+      r.flush();
+      const mid = lastDelivery(store)?.state;
+      const d = lastDelivery(store)!;
+      injectAck(r, {
+        deliveryId: d.id,
+        from: "h",
+        generation: d.generation,
+        outcome: "rejected",
+      });
+      r.flush();
+      return eq(
+        "delivered · rejected",
+        `${mid} · ${lastDelivery(store)?.state}`,
+        {
+          after: [lastDelivery(store)?.reason ?? ""],
+        },
+      );
+    },
+  },
+  {
+    id: "amr-mailbox",
+    group: "amr",
+    primitive: "mailbox overflow",
+    path: "amr/delivery/overflow",
+    title: "收件方过载，新投递 Failed mailbox_overflow",
+    erlang:
+      "admission 在 room，不在 actor mailbox。pending 非终态 delivery 超过 cap，新信封直接 Failed，不送进进程。",
+    run() {
+      const { r, store } = setup([
+        { id: "a", kind: "agent", behavior: "ack" },
+        { id: "b", kind: "agent", behavior: "hang" },
+      ]);
+      store.mailboxCap = 3;
+      for (let i = 0; i < 4; i++) {
+        injectSend(r, { from: "a", to: "b", payload: HI, ackRequired: true, deadlineMs: 400 });
+        r.flush();
+      }
+      const got = [...store.deliveries.values()].map((d) => d.reason ?? d.state);
+      return eq(
+        ["delivered", "delivered", "delivered", "mailbox_overflow"],
+        got,
+      );
+    },
+  },
+  {
     id: "amr-presence",
     group: "amr",
     primitive: "presence",
     path: "amr/presence/change",
     title: "Alive → Busy → Offline 发出 presence 事件",
     erlang:
-      "presence 是 room 内状态，不是进程。系统事件和业务消息走同一条 note，不是旁路日志。",
+      "presence 是 room 内状态投影，不是事实来源。系统事件和业务消息走同一条 note，不是旁路日志。",
     run() {
       const { r, store } = pair();
       injectPresence(r, "b", "busy");
@@ -356,7 +551,7 @@ export const AMR_CASES: SemCase[] = [
     path: "amr/delivery/no-route",
     title: "不可达 participant 进入 Failed no_route",
     erlang:
-      "whereis 不到目标：Failed no_route。mailbox overflow 是同一终态的另一种 reason，第一版只做路由失败。",
+      "whereis 不到目标：Failed no_route。mailbox overflow 是同一终态的另一种 reason。",
     run() {
       const { r, store } = pair();
       injectSend(r, { from: "a", to: "ghost", payload: HI });

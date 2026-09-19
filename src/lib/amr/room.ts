@@ -4,6 +4,8 @@ import { supervise } from "../actor/supervisor.ts";
 import {
   isTerminal,
   note,
+  pendingTo,
+  type AckPayload,
   type AmrStore,
   type Behavior,
   type Delivery,
@@ -12,6 +14,7 @@ import {
   type ParticipantSpec,
   type Payload,
   type Presence,
+  type WaitResult,
 } from "./types.ts";
 
 const L = "amr.ml:room.receive";
@@ -60,9 +63,9 @@ export function injectSend(r: Runtime, req: SendPayload) {
   if (pid != null) r.inject(pid, term("amr.send", req));
 }
 
-export function injectAck(r: Runtime, deliveryId: string, from: string) {
+export function injectAck(r: Runtime, req: AckPayload) {
   const pid = r.whereis("room");
-  if (pid != null) r.inject(pid, term("amr.ack", { deliveryId, from }));
+  if (pid != null) r.inject(pid, term("amr.ack", req));
 }
 
 export function injectCancel(r: Runtime, deliveryId: string) {
@@ -91,10 +94,29 @@ export function lastDelivery(store: AmrStore): Delivery | undefined {
   return last;
 }
 
+function decodeReply(reply: unknown): WaitResult {
+  switch (reply) {
+    case "acked":
+    case "timeout":
+    case "down":
+    case "cancelled":
+    case "rejected":
+    case "failed":
+      return reply;
+    default:
+      return "acked";
+  }
+}
+
 /**
  * OTP 24+ gen:call shape, pointed at the room: monitor `{alias, demonitor}`,
  * send the envelope with replyRef, receive Reply | DOWN | timeout.
- * Timeout deactivates the alias; a late Ack→Reply is dropped like a dead Pid.
+ *
+ * Two independent gates:
+ *   1. Room delivery gate — a terminal delivery never moves again.
+ *   2. Caller alias gate — timeout/cancel deactivates the alias; a later
+ *      Reply is dropped like a send to a dead Pid.
+ * Neither gate is a substitute for the other.
  */
 export function* sendAndWaitAck(
   env: {
@@ -105,7 +127,7 @@ export function* sendAndWaitAck(
   },
   timeout = 4000,
   loc = "amr.ml:wait_ack",
-): Generator<import("../actor/types.ts").Effect, "acked" | "timeout" | "down", unknown> {
+): Generator<import("../actor/types.ts").Effect, WaitResult, unknown> {
   const room = (yield fx.whereis("room", loc)) as Pid | null;
   if (room == null) return "down";
   const ref = (yield fx.monitor(room, loc, "demonitor")) as Ref;
@@ -135,17 +157,26 @@ export function* sendAndWaitAck(
       loc,
       0,
     )) as Msg;
-    if (leftover.t === "Reply") return "acked";
+    if (leftover.t === "Reply") return decodeReply(leftover.reply);
     return "timeout";
   }
   yield fx.demonitor(ref, loc, true);
-  if (m.t === "Reply") return "acked";
+  if (m.t === "Reply") return decodeReply(m.reply);
   return "down";
 }
 
 function isRoomMsg(m: Msg): boolean {
   if (m.t === "EXIT" || m.t === "DOWN" || m.t === "Crash") return true;
   return m.t === "Term" && m.tag.startsWith("amr.");
+}
+
+function* replyWaiter(d: Delivery, reply: WaitResult) {
+  if (d.replyRef == null) return;
+  yield fx.send(
+    { alias: d.replyRef },
+    { t: "Reply", ref: d.replyRef, reply },
+    "amr.ml:room.reply",
+  );
 }
 
 function roomProc(store: AmrStore): ProcFn {
@@ -166,7 +197,7 @@ function roomProc(store: AmrStore): ProcFn {
           yield* onSend(store, msg.payload as SendPayload);
           break;
         case "amr.ack":
-          yield* onAck(store, msg.payload as { deliveryId: string; from: string });
+          yield* onAck(store, msg.payload as AckPayload);
           break;
         case "amr.cancel":
           yield* onCancel(store, (msg.payload as { deliveryId: string }).deliveryId);
@@ -184,7 +215,10 @@ function roomProc(store: AmrStore): ProcFn {
           );
           break;
         case "amr.hello":
-          yield* onHello(store, (msg.payload as { id: string }).id);
+          yield* onHello(
+            store,
+            msg.payload as { id: string; generation?: number },
+          );
           break;
         case "amr.deadline":
           yield* onDeadline(
@@ -211,6 +245,7 @@ function* routeOne(store: AmrStore, req: SendPayload, to: string) {
   const now = (yield fx.now("amr.ml:room.route")) as number;
   const id = `d${store.seq++}`;
   const msgId = req.msgId ?? `m${store.seq++}`;
+  const row = store.participants.get(to);
   const d: Delivery = {
     id,
     msgId,
@@ -219,20 +254,31 @@ function* routeOne(store: AmrStore, req: SendPayload, to: string) {
     state: "accepted",
     createdAt: now,
     replyRef: req.replyRef,
+    generation: row?.generation ?? 0,
   };
   store.deliveries.set(id, d);
   note(store, now, "accepted", `${req.from} → ${to}`);
 
-  const row = store.participants.get(to);
   const pid = (yield fx.whereis(to, "amr.ml:room.route")) as Pid | null;
-  if (pid == null || row?.presence === "offline") {
+  if (pid == null || !row || row.presence === "offline") {
     d.state = "failed";
     d.reason = row ? "recipient_down" : "no_route";
     note(store, now, "failed", `${to} ${d.reason}`);
+    yield* replyWaiter(d, "failed");
+    return;
+  }
+
+  if (pendingTo(store, to) > store.mailboxCap) {
+    d.state = "failed";
+    d.reason = "mailbox_overflow";
+    note(store, now, "failed", `${to} mailbox_overflow`);
+    yield* replyWaiter(d, "failed");
     return;
   }
 
   d.state = "routed";
+  d.destPid = pid;
+  d.generation = row.generation;
   const env: Envelope = {
     msgId,
     deliveryId: id,
@@ -242,6 +288,7 @@ function* routeOne(store: AmrStore, req: SendPayload, to: string) {
     ackRequired: req.ackRequired !== false,
     deadlineMs: req.deadlineMs,
     replyRef: req.replyRef,
+    generation: d.generation,
     payload: req.payload,
   };
   yield fx.send(pid, term("amr.deliver", env), "amr.ml:room.route");
@@ -272,7 +319,7 @@ function deadlineProc(deliveryId: string, ms: number): ProcFn {
   };
 }
 
-function* onAck(store: AmrStore, req: { deliveryId: string; from: string }) {
+function* onAck(store: AmrStore, req: AckPayload) {
   const now = (yield fx.now("amr.ml:room.reply")) as number;
   const d = store.deliveries.get(req.deliveryId);
   if (!d) return;
@@ -280,15 +327,20 @@ function* onAck(store: AmrStore, req: { deliveryId: string; from: string }) {
     note(store, now, "drop", `late ack ${d.id}`);
     return;
   }
+  if (req.from !== d.to || req.generation !== d.generation) {
+    note(store, now, "drop", `stale ack ${d.id} g${req.generation}`);
+    return;
+  }
+  if (req.outcome === "rejected") {
+    d.state = "rejected";
+    d.reason = "rejected";
+    note(store, now, "rejected", `${req.from} ${d.id}`);
+    yield* replyWaiter(d, "rejected");
+    return;
+  }
   d.state = "acked";
   note(store, now, "acked", `${req.from} ${d.id}`);
-  if (d.replyRef != null) {
-    yield fx.send(
-      { alias: d.replyRef },
-      { t: "Reply", ref: d.replyRef, reply: "acked" },
-      "amr.ml:room.reply",
-    );
-  }
+  yield* replyWaiter(d, "acked");
 }
 
 function* onCancel(store: AmrStore, deliveryId: string) {
@@ -297,6 +349,7 @@ function* onCancel(store: AmrStore, deliveryId: string) {
   if (!d || isTerminal(d.state)) return;
   d.state = "cancelled";
   note(store, now, "cancelled", d.id);
+  yield* replyWaiter(d, "cancelled");
 }
 
 function* onDeadline(store: AmrStore, deliveryId: string) {
@@ -306,6 +359,7 @@ function* onDeadline(store: AmrStore, deliveryId: string) {
   d.state = "timed_out";
   d.reason = "ack_deadline";
   note(store, now, "timed_out", d.id);
+  yield* replyWaiter(d, "timeout");
 }
 
 function* onJoin(store: AmrStore, spec: ParticipantSpec) {
@@ -330,21 +384,22 @@ function* onPresence(
   note(store, now, "presence", `${req.id} ${req.presence}`);
 }
 
-function* onHello(store: AmrStore, id: string) {
+function* onHello(store: AmrStore, req: { id: string; generation?: number }) {
   const now = (yield fx.now("amr.ml:room.monitor")) as number;
-  const pid = (yield fx.whereis(id, "amr.ml:room.monitor")) as Pid | null;
-  const row = store.participants.get(id);
+  const pid = (yield fx.whereis(req.id, "amr.ml:room.monitor")) as Pid | null;
+  const row = store.participants.get(req.id);
   if (!row) return;
   const prev = row.pid;
   row.pid = pid;
+  if (req.generation != null) row.generation = req.generation;
   if (pid != null) yield fx.monitor(pid, "amr.ml:room.monitor");
   if (row.presence === "restarting" || (prev != null && prev !== pid)) {
     row.restarts += 1;
     row.presence = "alive";
-    note(store, now, "restarted", `${id} #${pid}`);
+    note(store, now, "restarted", `${req.id} #${pid} g${row.generation}`);
   } else {
     row.presence = "alive";
-    note(store, now, "join", `${id} #${pid}`);
+    note(store, now, "join", `${req.id} #${pid} g${row.generation}`);
   }
 }
 
@@ -357,10 +412,11 @@ function* onDown(store: AmrStore, pid: Pid, reason: string) {
   row.presence = crashing && row.kind !== "human" ? "restarting" : "offline";
   note(store, now, "down", `${row.id} ${reason}`);
   for (const d of store.deliveries.values()) {
-    if (d.to === row.id && !isTerminal(d.state)) {
+    if (d.destPid === pid && !isTerminal(d.state)) {
       d.state = "failed";
       d.reason = "recipient_down";
       note(store, now, "failed", `${d.id} recipient_down`);
+      yield* replyWaiter(d, "down");
     }
   }
 }
@@ -378,6 +434,16 @@ function eventLogProc(): ProcFn {
   };
 }
 
+function bumpGen(store: AmrStore, spec: ParticipantSpec): number {
+  let row = store.participants.get(spec.id);
+  if (!row) {
+    row = rowOf(spec);
+    store.participants.set(spec.id, row);
+  }
+  row.generation += 1;
+  return row.generation;
+}
+
 function participantSupProc(store: AmrStore, initial: ParticipantSpec[]): ProcFn {
   return function* () {
     yield fx.register("participant_sup", "amr.ml:psup.register");
@@ -389,10 +455,10 @@ function participantSupProc(store: AmrStore, initial: ParticipantSpec[]): ProcFn
     };
     const children: Child[] = [];
     for (const spec of initial) {
-      store.participants.set(spec.id, rowOf(spec));
+      const gen = bumpGen(store, spec);
       const pid = (yield fx.spawn(
         spec.id,
-        participantProc(spec),
+        participantProc(spec, gen),
         "amr.ml:psup.spawn",
         true,
       )) as Pid;
@@ -411,12 +477,10 @@ function participantSupProc(store: AmrStore, initial: ParticipantSpec[]): ProcFn
       if (msg.t === "Term" && msg.tag === "amr.spawn_p") {
         const spec = msg.payload as ParticipantSpec;
         if (children.some((c) => c.spec.id === spec.id)) continue;
-        if (!store.participants.has(spec.id)) {
-          store.participants.set(spec.id, rowOf(spec));
-        }
+        const gen = bumpGen(store, spec);
         const pid = (yield fx.spawn(
           spec.id,
-          participantProc(spec),
+          participantProc(spec, gen),
           "amr.ml:psup.spawn",
           true,
         )) as Pid;
@@ -439,27 +503,32 @@ function participantSupProc(store: AmrStore, initial: ParticipantSpec[]): ProcFn
           children.splice(idx, 1);
           continue;
         }
+        const p = store.participants.get(row.spec.id);
+        if (p) p.presence = "restarting";
+        const gen = bumpGen(store, row.spec);
         const pid = (yield fx.spawn(
           row.spec.id,
-          participantProc(row.spec),
+          participantProc(row.spec, gen),
           "amr.ml:psup.restart",
           true,
         )) as Pid;
         row.pid = pid;
-        const p = store.participants.get(row.spec.id);
-        if (p) p.presence = "restarting";
       }
     }
   };
 }
 
-function participantProc(spec: ParticipantSpec): ProcFn {
+function participantProc(spec: ParticipantSpec, generation: number): ProcFn {
   const behavior: Behavior = spec.behavior ?? "ack";
   return function* () {
     yield fx.register(spec.id, "amr.ml:p.register");
     const room = (yield fx.whereis("room", "amr.ml:p.whereis")) as Pid | null;
     if (room != null) {
-      yield fx.send(room, term("amr.hello", { id: spec.id }), "amr.ml:p.hello");
+      yield fx.send(
+        room,
+        term("amr.hello", { id: spec.id, generation }),
+        "amr.ml:p.hello",
+      );
     }
     while (true) {
       const msg = (yield fx.receive(
@@ -481,13 +550,19 @@ function participantProc(spec: ParticipantSpec): ProcFn {
           yield fx.sleep(99999, "amr.ml:p.hang");
           continue;
         }
+        if (behavior === "gate") continue;
         if (behavior === "slow") {
           yield fx.sleep(spec.slowMs ?? 120, "amr.ml:p.slow");
         }
         if (room != null) {
           yield fx.send(
             room,
-            term("amr.ack", { deliveryId: env.deliveryId, from: spec.id }),
+            term("amr.ack", {
+              deliveryId: env.deliveryId,
+              from: spec.id,
+              generation,
+              outcome: "ok",
+            } satisfies AckPayload),
             "amr.ml:p.ack",
           );
         }
@@ -504,5 +579,6 @@ function rowOf(spec: ParticipantSpec) {
     presence: "offline" as Presence,
     behavior: (spec.behavior ?? "ack") as Behavior,
     restarts: 0,
+    generation: 0,
   };
 }

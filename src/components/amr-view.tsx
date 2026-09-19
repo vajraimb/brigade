@@ -284,6 +284,7 @@ function ParticipantGrid({
               <span className="mt-2 font-mono text-[11px] text-muted">
                 {row.presence}
                 {proc?.status === "sleeping" ? " · wait" : ""}
+                {row.generation > 0 ? ` · g${row.generation}` : ""}
                 {row.restarts > 0 ? ` · r${row.restarts}` : ""}
               </span>
             </button>
@@ -325,7 +326,11 @@ function DeliveryList({ deliveries }: { deliveries: Delivery[] }) {
 const RAIL = ["accepted", "routed", "delivered", "acked"] as const;
 
 function StateRail({ state }: { state: Delivery["state"] }) {
-  const failed = state === "failed" || state === "timed_out" || state === "cancelled";
+  const failed =
+    state === "failed" ||
+    state === "timed_out" ||
+    state === "cancelled" ||
+    state === "rejected";
   const idx = RAIL.indexOf(state as (typeof RAIL)[number]);
   return (
     <span className="flex w-full gap-1 sm:w-28 sm:shrink-0" aria-hidden>
@@ -500,6 +505,7 @@ function stateTone(state: Delivery["state"]): string {
   switch (state) {
     case "acked":
       return "text-ok";
+    case "rejected":
     case "failed":
     case "timed_out":
       return "text-crash";
@@ -515,7 +521,13 @@ function stateTone(state: Delivery["state"]): string {
 
 function eventTone(name: string): string {
   if (name === "acked" || name === "join" || name === "restarted") return "text-ok";
-  if (name === "drop" || name === "failed" || name === "down" || name === "timed_out") {
+  if (
+    name === "drop" ||
+    name === "failed" ||
+    name === "down" ||
+    name === "timed_out" ||
+    name === "rejected"
+  ) {
     return "text-crash";
   }
   if (name === "cancelled" || name === "presence") return "text-warn";

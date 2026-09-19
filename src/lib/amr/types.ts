@@ -7,6 +7,7 @@ export type DeliveryState =
   | "routed"
   | "delivered"
   | "acked"
+  | "rejected"
   | "timed_out"
   | "cancelled"
   | "failed";
@@ -16,9 +17,18 @@ export type FailureReason =
   | "recipient_down"
   | "mailbox_overflow"
   | "ack_deadline"
+  | "rejected"
   | "internal";
 
-export type Behavior = "ack" | "hang" | "crash" | "slow";
+export type Behavior = "ack" | "hang" | "crash" | "slow" | "gate";
+export type AckOutcome = "ok" | "rejected";
+export type WaitResult =
+  | "acked"
+  | "timeout"
+  | "down"
+  | "cancelled"
+  | "rejected"
+  | "failed";
 
 export type ParticipantSpec = {
   id: string;
@@ -41,7 +51,15 @@ export type Envelope = {
   ackRequired: boolean;
   deadlineMs?: number;
   replyRef?: Ref;
+  generation: number;
   payload: Payload;
+};
+
+export type AckPayload = {
+  deliveryId: string;
+  from: string;
+  generation: number;
+  outcome?: AckOutcome;
 };
 
 export type Delivery = {
@@ -53,6 +71,8 @@ export type Delivery = {
   reason?: FailureReason;
   createdAt: number;
   replyRef?: Ref;
+  generation: number;
+  destPid?: Pid;
 };
 
 export type AmrEvent = {
@@ -68,6 +88,7 @@ export type ParticipantRow = {
   presence: Presence;
   behavior: Behavior;
   restarts: number;
+  generation: number;
 };
 
 export type AmrStore = {
@@ -76,7 +97,10 @@ export type AmrStore = {
   deliveries: Map<string, Delivery>;
   events: AmrEvent[];
   seq: number;
+  mailboxCap: number;
 };
+
+export const MAILBOX_CAP = 8;
 
 export function emptyStore(roomId = "war-1"): AmrStore {
   return {
@@ -85,6 +109,7 @@ export function emptyStore(roomId = "war-1"): AmrStore {
     deliveries: new Map(),
     events: [],
     seq: 1,
+    mailboxCap: MAILBOX_CAP,
   };
 }
 
@@ -96,10 +121,19 @@ export function note(store: AmrStore, at: number, name: string, detail: string) 
 export function isTerminal(state: DeliveryState): boolean {
   return (
     state === "acked" ||
+    state === "rejected" ||
     state === "timed_out" ||
     state === "cancelled" ||
     state === "failed"
   );
+}
+
+export function pendingTo(store: AmrStore, to: string): number {
+  let n = 0;
+  for (const d of store.deliveries.values()) {
+    if (d.to === to && !isTerminal(d.state)) n += 1;
+  }
+  return n;
 }
 
 export const DEMO: ParticipantSpec[] = [
