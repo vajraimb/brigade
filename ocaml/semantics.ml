@@ -73,9 +73,9 @@ type process = {
        | Reply Ref pong -> demonitor Ref ~flush:true; pong
        | Down  Ref killed -> demonitor Ref ~flush:true; fail
 
-   monitor a dead Pid → immediate DOWN noproc.
-   demonitor ~flush:true sweeps a DOWN already in the mailbox.
-   demonitor without flush leaves it for receive.
+   OTP 24 (EEP-53): gen:reply sends to the alias, not the Pid.
+   Timeout deactivates the alias; a late Reply drops like send-to-dead-Pid.
+   Receive marker: scan only messages that arrived after the Ref was created.
 *)
 
 (* gen_server is a functor, not a -behaviour attribute.  Callback

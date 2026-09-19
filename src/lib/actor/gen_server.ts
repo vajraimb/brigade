@@ -24,8 +24,9 @@ export function startLink<S, Req, Rep>(
       if (msg.t === "Call") {
         const out = cb.handleCall(msg.req as Req, msg.from, state);
         state = out.state;
+        // OTP 24+ gen:reply sends to the alias, not the Pid.
         yield fx.send(
-          msg.from,
+          { alias: msg.ref },
           { t: "Reply", ref: msg.ref, reply: out.reply },
           "gen_server.ml:reply",
         );
@@ -38,7 +39,12 @@ export function startLink<S, Req, Rep>(
   };
 }
 
-/** Erlang gen_server:call — monitor, send, receive Reply or DOWN. */
+/**
+ * OTP 24+ gen:call — monitor with `{alias, demonitor}`, send, receive
+ * Reply | DOWN. Reply is addressed to the alias. Timeout demonitors
+ * (alias dies); a Reply already in the mailbox is still taken; a
+ * later send to the alias drops.
+ */
 export function* call(
   to: Pid,
   req: unknown,
@@ -46,14 +52,25 @@ export function* call(
   timeout = 4000,
 ): Generator<import("./types.ts").Effect, unknown, unknown> {
   const me = (yield fx.self(loc)) as Pid;
-  const ref = (yield fx.monitor(to, loc)) as Ref;
+  const ref = (yield fx.monitor(to, loc, "demonitor")) as Ref;
   yield fx.send(to, { t: "Call", from: me, ref, req }, loc);
   const m = (yield fx.receive(
     (x) =>
       (x.t === "Reply" && x.ref === ref) || (x.t === "DOWN" && x.ref === ref),
     loc,
     timeout,
+    ref,
   )) as Msg;
+  if (m.t === "Timeout") {
+    yield fx.demonitor(ref, loc, true);
+    const leftover = (yield fx.receive(
+      (x) => x.t === "Reply" && x.ref === ref,
+      loc,
+      0,
+    )) as Msg;
+    if (leftover.t === "Reply") return leftover.reply;
+    throw new Error("timeout");
+  }
   yield fx.demonitor(ref, loc, true);
   if (m.t === "Reply") return m.reply;
   if (m.t === "DOWN") throw new Error(m.reason);

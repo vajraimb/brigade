@@ -1,10 +1,13 @@
 import type {
+  AliasMode,
   Effect,
   InFlight,
   Msg,
   Pid,
   ProcFn,
   Process,
+  Ref,
+  SendTo,
   Snapshot,
   TraceEvent,
   TraceOp,
@@ -14,6 +17,10 @@ export type RuntimeOpts = {
   deliveryMs?: number;
 };
 
+function isAlias(to: SendTo): to is { alias: Ref } {
+  return typeof to === "object" && to !== null && "alias" in to;
+}
+
 export class Runtime {
   now = 0;
   nextPid = 1;
@@ -22,6 +29,9 @@ export class Runtime {
   nextRef = 1;
   processes = new Map<Pid, Process>();
   names = new Map<string, Pid>();
+  /** EEP-53: ref → owner. Send to a missing alias drops, like a dead Pid. */
+  aliases = new Map<Ref, { owner: Pid; mode: AliasMode }>();
+  msgSeq = new WeakMap<Msg, number>();
   runQueue: Pid[] = [];
   inFlight: InFlight[] = [];
   events: TraceEvent[] = [];
@@ -52,6 +62,7 @@ export class Runtime {
       links: new Set(),
       monitors: new Map(),
       watchedBy: new Map(),
+      mailNext: 0,
       status: "runnable",
       parent,
       reductions: 0,
@@ -198,45 +209,17 @@ export class Runtime {
         break;
       }
       case "send": {
-        const dest =
-          typeof effect.to === "string"
-            ? this.names.get(effect.to)
-            : effect.to;
-        const msg = this.tagMsg(effect.msg);
-        const stampedId = "id" in msg && typeof msg.id === "number" && msg.id > 0
-          ? msg.id
-          : this.nextMsgId++;
-        const stamped = { ...msg, id: stampedId } as Msg;
-        if (dest == null || !this.processes.get(dest)?.alive) {
-          this.trace("drop", proc, `drop → ${String(effect.to)}`, {
-            loc: effect.loc,
-          });
-        } else {
-          this.inFlight.push({
-            id: stampedId,
-            from: proc.pid,
-            to: dest,
-            msg: stamped,
-            sentAt: this.now,
-            eta: this.now + this.deliveryMs,
-          });
-          this.trace(
-            "send",
-            proc,
-            `send ${labelOf(stamped)} → #${dest}`,
-            {
-              loc: effect.loc,
-              to: dest,
-              msgId: stampedId,
-            },
-          );
-        }
+        this.enqueueSend(proc, effect.to, effect.msg, effect.loc);
         proc.status = "runnable";
         this.runQueue.push(proc.pid);
         break;
       }
       case "receive": {
-        const found = this.scan(proc, effect.pred);
+        const afterSeq =
+          effect.sinceRef != null
+            ? proc.monitors.get(effect.sinceRef)?.createdSeq
+            : undefined;
+        const found = this.scan(proc, effect.pred, afterSeq);
         if (found) {
           this.trace(
             "receive",
@@ -245,6 +228,13 @@ export class Runtime {
             { loc: effect.loc, msgId: "id" in found ? found.id : undefined },
           );
           proc.resumeValue = found;
+          proc.status = "runnable";
+          proc.pred = null;
+          proc.wakeAt = null;
+          this.runQueue.push(proc.pid);
+        } else if (effect.timeout === 0) {
+          // `after 0` is one scan, not a park. OTP leftover-reply path.
+          proc.resumeValue = { t: "Timeout" } satisfies Msg;
           proc.status = "runnable";
           proc.pred = null;
           proc.wakeAt = null;
@@ -324,7 +314,7 @@ export class Runtime {
         proc.resumeValue = ref;
         proc.status = "runnable";
         this.runQueue.push(proc.pid);
-        this.installMonitor(proc, effect.pid, ref);
+        this.installMonitor(proc, effect.pid, ref, effect.alias);
         this.trace("monitor", proc, `monitor #${effect.pid} ref ${ref}`, {
           loc: effect.loc,
           to: effect.pid,
@@ -343,6 +333,47 @@ export class Runtime {
     }
   }
 
+  private enqueueSend(proc: Process, to: SendTo, raw: Msg, loc: string) {
+    const msg = this.tagMsg(raw);
+    const stampedId = "id" in msg && typeof msg.id === "number" && msg.id > 0
+      ? msg.id
+      : this.nextMsgId++;
+    const stamped = { ...msg, id: stampedId } as Msg;
+
+    let dest: Pid | undefined;
+    let via: Ref | undefined;
+    if (isAlias(to)) {
+      via = to.alias;
+      const a = this.aliases.get(to.alias);
+      dest = a?.owner;
+    } else if (typeof to === "string") {
+      dest = this.names.get(to);
+    } else {
+      dest = to;
+    }
+
+    if (dest == null || !this.processes.get(dest)?.alive) {
+      this.trace("drop", proc, `drop → ${isAlias(to) ? `alias ${to.alias}` : String(to)}`, {
+        loc,
+      });
+      return;
+    }
+    this.inFlight.push({
+      id: stampedId,
+      from: proc.pid,
+      to: dest,
+      via,
+      msg: stamped,
+      sentAt: this.now,
+      eta: this.now + this.deliveryMs,
+    });
+    this.trace("send", proc, `send ${labelOf(stamped)} → #${dest}`, {
+      loc,
+      to: dest,
+      msgId: stampedId,
+    });
+  }
+
   private tagMsg(msg: Msg): Msg {
     if ("id" in msg && typeof msg.id === "number" && msg.id > 0) return msg;
     if (msg.t === "Crash" || msg.t === "Timeout" || msg.t === "EXIT" || msg.t === "DOWN") return msg;
@@ -350,11 +381,20 @@ export class Runtime {
     return { ...msg, id } as Msg;
   }
 
-  private scan(proc: Process, pred: (m: Msg) => boolean): Msg | undefined {
+  private scan(
+    proc: Process,
+    pred: (m: Msg) => boolean,
+    afterSeq?: number,
+  ): Msg | undefined {
     const q = proc.mailbox;
     for (let i = 0; i < q.length; i++) {
       const m = q[i];
-      if (m && pred(m)) {
+      if (!m) continue;
+      if (afterSeq != null) {
+        const seq = this.msgSeq.get(m) ?? 0;
+        if (seq < afterSeq) continue;
+      }
+      if (pred(m)) {
         q.splice(i, 1);
         return m;
       }
@@ -372,14 +412,28 @@ export class Runtime {
     }
     this.inFlight = keep;
     for (const f of due) {
+      if (f.via != null && !this.aliases.has(f.via)) {
+        const src = this.processes.get(f.from);
+        if (src) {
+          this.trace("drop", src, `drop alias ${f.via}`, { to: f.to, msgId: f.id });
+        }
+        continue;
+      }
       const dest = this.processes.get(f.to);
       if (!dest?.alive) continue;
-      this.arrive(dest, f.msg);
+      this.arrive(dest, f.msg, f.via);
     }
   }
 
-  private arrive(proc: Process, msg: Msg) {
+  private arrive(proc: Process, msg: Msg, via?: Ref) {
+    this.msgSeq.set(msg, proc.mailNext++);
     proc.mailbox.push(msg);
+    if (via != null) {
+      const a = this.aliases.get(via);
+      if (a?.mode === "reply_demonitor") {
+        this.dropMonitor(proc, via, false);
+      }
+    }
     if (proc.status === "receiving" && proc.pred) {
       const found = this.scan(proc, proc.pred);
       if (found) {
@@ -423,7 +477,12 @@ export class Runtime {
     }
   }
 
-  private installMonitor(watcher: Process, targetPid: Pid, ref: number) {
+  private installMonitor(
+    watcher: Process,
+    targetPid: Pid,
+    ref: number,
+    alias?: AliasMode,
+  ) {
     const dest = this.processes.get(targetPid);
     if (!dest?.alive) {
       this.arrive(watcher, {
@@ -434,14 +493,20 @@ export class Runtime {
       });
       return;
     }
-    watcher.monitors.set(ref, targetPid);
+    watcher.monitors.set(ref, {
+      pid: targetPid,
+      alias,
+      createdSeq: watcher.mailNext,
+    });
     dest.watchedBy.set(ref, watcher.pid);
+    if (alias) this.aliases.set(ref, { owner: watcher.pid, mode: alias });
   }
 
   private dropMonitor(watcher: Process, ref: number, flush: boolean) {
-    const targetPid = watcher.monitors.get(ref);
+    const mon = watcher.monitors.get(ref);
     watcher.monitors.delete(ref);
-    if (targetPid != null) this.processes.get(targetPid)?.watchedBy.delete(ref);
+    this.aliases.delete(ref);
+    if (mon != null) this.processes.get(mon.pid)?.watchedBy.delete(ref);
     if (flush) {
       watcher.mailbox = watcher.mailbox.filter(
         (m) => !(m.t === "DOWN" && m.ref === ref),
@@ -456,10 +521,12 @@ export class Runtime {
       const w = this.processes.get(watcherPid);
       if (!w?.alive) continue;
       w.monitors.delete(ref);
+      this.aliases.delete(ref);
       this.arrive(w, { t: "DOWN", ref, pid: proc.pid, reason });
     }
-    for (const [ref, targetPid] of proc.monitors) {
-      this.processes.get(targetPid)?.watchedBy.delete(ref);
+    for (const [ref, mon] of proc.monitors) {
+      this.processes.get(mon.pid)?.watchedBy.delete(ref);
+      this.aliases.delete(ref);
     }
     proc.monitors.clear();
   }
@@ -526,8 +593,32 @@ export class Runtime {
     this.trace(crashing ? "crash" : "exit", proc, `${proc.name} ${reason}`, {
       loc: crashing ? "actor.ml:die" : "actor.ml:retc",
     });
+    // Messages this process already sent arrive before its DOWN/EXIT.
+    this.deliverFrom(proc.pid);
     this.notifyMonitors(proc, reason);
     this.propagate(proc, reason);
+  }
+
+  /** BEAM: a message sent before exit is delivered before that exit's signals. */
+  private deliverFrom(pid: Pid) {
+    if (this.inFlight.length === 0) return;
+    const due: InFlight[] = [];
+    const keep: InFlight[] = [];
+    for (const f of this.inFlight) {
+      if (f.from === pid) due.push(f);
+      else keep.push(f);
+    }
+    this.inFlight = keep;
+    for (const f of due) {
+      if (f.via != null && !this.aliases.has(f.via)) {
+        const src = this.processes.get(f.from);
+        if (src) this.trace("drop", src, `drop alias ${f.via}`, { to: f.to, msgId: f.id });
+        continue;
+      }
+      const dest = this.processes.get(f.to);
+      if (!dest?.alive) continue;
+      this.arrive(dest, f.msg, f.via);
+    }
   }
 
   private gcDead() {

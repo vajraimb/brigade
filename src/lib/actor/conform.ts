@@ -1,24 +1,35 @@
 /**
- * Machine-executable kernel dump.  Always prints brigade TSV
- * (`id<TAB>got`) for OTP_IDS.  If `escript` is on PATH, runs
- * erlang/conformance.erl (written against OTP 29.1) and diffs
- * byte-for-byte.
- *
- * Missing Erlang is a skip, not a fail — the sandbox cannot apt-get OTP.
+ * Kernel dump. Always prints brigade TSV (`id<TAB>got<TAB>path`).
+ * Three-state report on stderr:
+ *   brigade-self     — this runtime
+ *   otp-reference    — erlang/conformance.erl
+ *   differential     — byte-identical got column
+ * Missing Erlang is SKIP for the last two, not a silent pass.
  */
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { OTP_IDS, otpDump } from "./semantics.ts";
+import { OTP_IDS, OTP_PATH, otpDump } from "./semantics.ts";
 
-export type DumpLine = { id: string; got: string; ok: boolean };
+export type DumpLine = { id: string; got: string; ok: boolean; path: string };
 
 export function dumpOtp(): DumpLine[] {
-  return otpDump();
+  return otpDump().map((r) => ({
+    ...r,
+    path: OTP_PATH[r.id as keyof typeof OTP_PATH] ?? r.id,
+  }));
 }
 
-export function formatTsv(rows: DumpLine[]): string {
-  return rows.map((r) => `${r.id}\t${r.got}`).join("\n") + "\n";
+export function formatTsv(
+  rows: DumpLine[],
+  header: { oracle: string },
+): string {
+  const lines = [
+    `# brigade-self`,
+    `# oracle: ${header.oracle}`,
+    ...rows.map((r) => `${r.id}\t${r.got}\t${r.path}`),
+  ];
+  return lines.join("\n") + "\n";
 }
 
 function parseTsv(text: string): Map<string, string> {
@@ -28,48 +39,64 @@ function parseTsv(text: string): Map<string, string> {
     if (!line || line.startsWith("#") || line.startsWith("%%")) continue;
     const tab = line.indexOf("\t");
     if (tab < 0) continue;
-    m.set(line.slice(0, tab), line.slice(tab + 1));
+    const rest = line.slice(tab + 1);
+    const tab2 = rest.indexOf("\t");
+    const got = tab2 < 0 ? rest : rest.slice(0, tab2);
+    m.set(line.slice(0, tab), got);
   }
   return m;
 }
 
+function report(name: string, status: string) {
+  const pad = name.padEnd(16);
+  process.stderr.write(`${pad} ${status}\n`);
+}
+
 function main() {
   const rows = dumpOtp();
-  const tsv = formatTsv(rows);
+  const tsv = formatTsv(rows, { oracle: "none" });
   const outDir = join(process.cwd(), "erlang");
   mkdirSync(outDir, { recursive: true });
   writeFileSync(join(outDir, "brigade.tsv"), tsv);
   process.stdout.write(tsv);
 
-  let failed = 0;
+  let selfFail = 0;
   for (const r of rows) {
     if (!r.ok) {
       process.stderr.write(`FAIL ${r.id}: brigade case not ok (got ${r.got})\n`);
-      failed++;
+      selfFail++;
     }
   }
+  report(
+    "brigade-self",
+    selfFail === 0 ? `${rows.length}/${rows.length} PASS` : `${rows.length - selfFail}/${rows.length} FAIL`,
+  );
 
   const erl = spawnSync("escript", ["erlang/conformance.erl"], {
     encoding: "utf8",
     timeout: 20_000,
   });
   if (erl.error && (erl.error as NodeJS.ErrnoException).code === "ENOENT") {
-    process.stderr.write(
-      "skip: no escript on PATH — brigade TSV written; install OTP 29.1 to diff.\n",
-    );
-    process.exit(failed === 0 ? 0 : 1);
+    report("otp-reference", "SKIP (no escript)");
+    report("differential", "SKIP");
+    process.exit(selfFail === 0 ? 0 : 1);
   }
   if (erl.status !== 0) {
-    process.stderr.write(
-      `escript failed (${erl.status}): ${erl.stderr || erl.stdout}\n`,
-    );
+    report("otp-reference", `FAIL escript ${erl.status}`);
+    report("differential", "SKIP");
+    process.stderr.write(`${erl.stderr || erl.stdout}\n`);
     process.exit(1);
   }
 
-  const gold = parseTsv(tsv);
   const them = parseTsv(erl.stdout);
-  writeFileSync(join(outDir, "otp.tsv"), erl.stdout);
+  writeFileSync(
+    join(outDir, "otp.tsv"),
+    `# otp-reference\n# oracle: erl\n${erl.stdout}`,
+  );
+  report("otp-reference", `${them.size} lines`);
 
+  const gold = parseTsv(tsv);
+  let diffFail = 0;
   const ids = OTP_IDS as readonly string[];
   for (const id of ids) {
     const a = gold.get(id);
@@ -78,21 +105,20 @@ function main() {
       process.stderr.write(
         `DIFF ${id}\n  brigade\t${a ?? "<missing>"}\n  otp    \t${b ?? "<missing>"}\n`,
       );
-      failed++;
+      diffFail++;
     }
   }
   for (const id of them.keys()) {
     if (!gold.has(id)) {
       process.stderr.write(`EXTRA otp ${id}\t${them.get(id)}\n`);
-      failed++;
+      diffFail++;
     }
   }
-
-  if (failed === 0) {
-    process.stderr.write(`ok: ${ids.length} cases byte-identical with OTP\n`);
-    process.exit(0);
-  }
-  process.exit(1);
+  report(
+    "differential",
+    diffFail === 0 ? "PASS" : `${diffFail} DIFF`,
+  );
+  process.exit(selfFail === 0 && diffFail === 0 ? 0 : 1);
 }
 
 const isMain =

@@ -10,16 +10,18 @@ for (const c of CASES) {
   });
 }
 
-test("OTP_IDS kernel dump is 20 lines, all ok", () => {
+test("OTP_IDS kernel dump matches length, all ok", () => {
   const rows = dumpOtp();
-  assert.equal(rows.length, 20);
   assert.equal(rows.length, OTP_IDS.length);
   for (const row of rows) {
     assert.equal(row.ok, true, `${row.id}: ${row.got}`);
   }
-  const tsv = formatTsv(rows);
-  const lines = tsv.trimEnd().split("\n");
-  assert.equal(lines.length, 20);
-  assert.match(lines[0]!, /^spawn\t/);
-  assert.match(lines[19]!, /^gs-cast\t/);
+  const tsv = formatTsv(rows, { oracle: "none" });
+  const data = tsv
+    .trimEnd()
+    .split("\n")
+    .filter((l) => !l.startsWith("#"));
+  assert.equal(data.length, OTP_IDS.length);
+  assert.match(data[0]!, /^spawn\t/);
+  assert.match(data[data.length - 1]!, /^gs-cast\t/);
 });

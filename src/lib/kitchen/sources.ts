@@ -71,9 +71,9 @@ mark("semantics.ml", "receive fry", "semantics.ml:run");
 
 mark("gen_server.ml", "register name;", "gen_server.ml:register");
 mark("gen_server.ml", "let rec loop state", "gen_server.ml:loop");
-mark("gen_server.ml", "send from (Reply", "gen_server.ml:reply");
 mark("gen_server.ml", "let call pid req", "gen_server.ml:call");
-mark("gen_server.ml", "let r = monitor pid", "gen_server.ml:monitor");
+mark("gen_server.ml", "let r = monitor ~alias:true pid", "gen_server.ml:monitor");
+mark("gen_server.ml", "send_alias r (Reply", "gen_server.ml:reply");
 
 export function fileForLoc(loc: string | null | undefined): SourceFile {
   if (!loc) return "kitchen.ml";

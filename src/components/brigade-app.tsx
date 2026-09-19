@@ -132,7 +132,7 @@ export function BrigadeApp() {
             </h1>
             <p className="mt-1 hidden max-w-xl text-sm leading-snug text-muted sm:block">
               {mode === "lab"
-                ? "厨房是可视化测试场。语义套件逐条对照 OTP：spawn / send / receive / link / monitor / gen_server。"
+                ? "厨房是可视化测试场。语义套件逐条对照 OTP：spawn / send / receive / link / monitor / alias / gen_server。"
                 : "后厨是一棵监督树。工单是消息，厨师是进程。灶台着火时不救厨师——supervisor 再 spawn 一个。"}
             </p>
           </div>

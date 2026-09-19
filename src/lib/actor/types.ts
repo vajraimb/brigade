@@ -1,6 +1,17 @@
 export type Pid = number;
 export type Ref = number;
 
+/** EEP-53: the monitor ref is also the alias. */
+export type AliasMode = "demonitor" | "reply_demonitor";
+
+export type SendTo = Pid | string | { alias: Ref };
+
+export type MonitorInfo = {
+  pid: Pid;
+  alias?: AliasMode;
+  createdSeq: number;
+};
+
 export type Station = "grill" | "fry" | "pass";
 
 export type MenuItem = {
@@ -40,8 +51,14 @@ export type ProcFn = () => Generator<Effect, void, unknown>;
 
 export type Effect =
   | { op: "spawn"; name: string; fn: ProcFn; link?: boolean; loc: string }
-  | { op: "send"; to: Pid | string; msg: Msg; loc: string }
-  | { op: "receive"; pred: (m: Msg) => boolean; timeout?: number; loc: string }
+  | { op: "send"; to: SendTo; msg: Msg; loc: string }
+  | {
+      op: "receive";
+      pred: (m: Msg) => boolean;
+      timeout?: number;
+      loc: string;
+      sinceRef?: Ref;
+    }
   | { op: "self"; loc: string }
   | { op: "sleep"; ms: number; loc: string }
   | { op: "register"; name: string; loc: string }
@@ -52,7 +69,7 @@ export type Effect =
   | { op: "now"; loc: string }
   | { op: "exit"; reason: string; loc: string }
   | { op: "exit_pid"; pid: Pid; reason: string; loc: string }
-  | { op: "monitor"; pid: Pid; loc: string }
+  | { op: "monitor"; pid: Pid; loc: string; alias?: AliasMode }
   | { op: "demonitor"; ref: Ref; flush?: boolean; loc: string };
 
 export type ProcessStatus =
@@ -70,9 +87,10 @@ export type Process = {
   trapExit: boolean;
   links: Set<Pid>;
   /** ref → target this process monitors */
-  monitors: Map<Ref, Pid>;
+  monitors: Map<Ref, MonitorInfo>;
   /** ref → watcher monitoring this process */
   watchedBy: Map<Ref, Pid>;
+  mailNext: number;
   status: ProcessStatus;
   parent?: Pid;
   reductions: number;
@@ -94,6 +112,7 @@ export type InFlight = {
   id: number;
   from: Pid;
   to: Pid;
+  via?: Ref;
   msg: Msg;
   sentAt: number;
   eta: number;
@@ -176,7 +195,7 @@ export function E() {
       link,
       loc,
     }),
-    send: (to: Pid | string, msg: Msg, loc: string): Effect => ({
+    send: (to: SendTo, msg: Msg, loc: string): Effect => ({
       op: "send",
       to,
       msg,
@@ -186,7 +205,8 @@ export function E() {
       pred: (m: Msg) => boolean,
       loc: string,
       timeout?: number,
-    ): Effect => ({ op: "receive", pred, timeout, loc }),
+      sinceRef?: Ref,
+    ): Effect => ({ op: "receive", pred, timeout, loc, sinceRef }),
     self: (loc: string): Effect => ({ op: "self", loc }),
     sleep: (ms: number, loc: string): Effect => ({ op: "sleep", ms, loc }),
     register: (name: string, loc: string): Effect => ({
@@ -214,7 +234,12 @@ export function E() {
       reason,
       loc,
     }),
-    monitor: (pid: Pid, loc: string): Effect => ({ op: "monitor", pid, loc }),
+    monitor: (pid: Pid, loc: string, alias?: AliasMode): Effect => ({
+      op: "monitor",
+      pid,
+      loc,
+      alias,
+    }),
     demonitor: (ref: Ref, loc: string, flush = false): Effect => ({
       op: "demonitor",
       ref,

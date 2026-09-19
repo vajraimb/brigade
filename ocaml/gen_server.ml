@@ -1,13 +1,8 @@
 (* gen_server.ml — OTP gen_server as a functor, not a -behaviour attribute.
-   Call is monitor + send + selective receive of Reply | DOWN.  Without
-   unidirectional monitor, call cannot be distinguished from a stuck server.
-
-   Erlang's `-behaviour(gen_server)` is an attribute the compiler warns
-   about.  A functor makes the callback a real module type: `state` is
-   abstract, `handle_call` / `handle_cast` are exhaustive at the functor
-   application, and a missing callback is a type error rather than a
-   runtime `undef`.  That is the Caramel argument — the module system
-   plus exhaustiveness — applied to the behaviour that needs it most. *)
+   OTP 24+ call is monitor ~alias:true + send + selective receive of
+   Reply | DOWN.  gen:reply sends to the alias, not the Pid.  Timeout
+   deactivates the alias; a late Reply is dropped the same way a send
+   to a dead Pid is dropped. *)
 
 open Actor
 
@@ -35,17 +30,17 @@ module Make (C : Callback) = struct
         | Crash -> failwith "gen_server abort"
         | Call (from, r, req) ->
             let reply, state = C.handle_call req from state in
-            send from (Reply (r, reply));
+            send_alias r (Reply (r, reply));
             loop state
         | Cast req -> loop (C.handle_cast req state)
         | _ -> loop state
       in
       loop (C.init ())
 
-  (* gen_server:call/2 — the reason monitor exists. *)
+  (* OTP 24+ gen:call — monitor with {alias, demonitor}. *)
   let call pid req =
     let me = self () in
-    let r = monitor pid in
+    let r = monitor ~alias:true pid in
     send pid (Call (me, r, req));
     match
       receive ~timeout:4.0
@@ -63,7 +58,13 @@ module Make (C : Callback) = struct
         failwith reason
     | Timeout ->
         demonitor r ~flush:true;
-        failwith "timeout"
+        (match
+           receive ~timeout:0.
+             (function Reply (x, _) when x = r -> true | _ -> false)
+             ()
+         with
+         | Reply (_, rep) -> rep
+         | _ -> failwith "timeout")
     | _ ->
         demonitor r ~flush:true;
         failwith "timeout"

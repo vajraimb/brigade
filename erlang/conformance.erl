@@ -37,6 +37,8 @@ main(_) ->
         {"demonitor-leaves", fun demonitor_leaves/0},
         {"gs-call", fun gs_call/0},
         {"gs-call-crash", fun gs_call_crash/0},
+        {"gs-call-timeout", fun gs_call_timeout/0},
+        {"gs-call-empty", fun gs_call_empty/0},
         {"gs-cast", fun gs_cast/0}
     ],
     lists:foreach(
@@ -361,6 +363,7 @@ demonitor_leaves() ->
 init([]) -> {ok, []}.
 
 handle_call(ping, _From, S) -> {reply, pong, S};
+handle_call(die, _From, S) -> {stop, normal, pong, S};
 handle_call(seen, _From, S) -> {reply, S, S};
 handle_call(Other, _From, S) -> {reply, Other, S}.
 
@@ -406,6 +409,51 @@ gs_call_crash() ->
                    false -> "client dead"
                end,
         fmt_term(Reason) ++ " · " ++ Live
+    end.
+
+gs_call_timeout() ->
+    Parent = self(),
+    Server = spawn(fun() ->
+        receive
+            {'$gen_call', From, ping} ->
+                receive after 200 ->
+                    gen_server:reply(From, pong)
+                end
+        end
+    end),
+    Client = spawn(fun() ->
+        Result = (catch gen_server:call(Server, ping, 20)),
+        receive after 400 -> ok end,
+        Msgs = case erlang:process_info(self(), messages) of
+                   {messages, M} -> M;
+                   undefined -> []
+               end,
+        Parent ! {got, Result, Msgs}
+    end),
+    receive {got, Result, Msgs} ->
+        Reason = case Result of
+                     {'EXIT', timeout} -> timeout;
+                     {'EXIT', {timeout, _}} -> timeout;
+                     {'EXIT', R} -> R;
+                     Other -> Other
+                 end,
+        fmt_term(Reason) ++ " · " ++ fmt_list(Msgs)
+    end.
+
+gs_call_empty() ->
+    Parent = self(),
+    Client = spawn(fun() ->
+        {ok, Pid} = gen_server:start(?MODULE, [], []),
+        Reply = gen_server:call(Pid, die),
+        receive after 50 -> ok end,
+        Msgs = case erlang:process_info(self(), messages) of
+                   {messages, M} -> M;
+                   undefined -> []
+               end,
+        Parent ! {got, Reply, Msgs}
+    end),
+    receive {got, Reply, Msgs} ->
+        fmt_term(Reply) ++ " · " ++ fmt_list(Msgs)
     end.
 
 gs_cast() ->

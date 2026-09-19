@@ -2,7 +2,7 @@
    scheduled on Eio fibers.
 
    Effect layer:  receive / send / wait  (perform, scan, continue k)
-   Runtime layer: Pid, mailbox, link, monitor, lifecycle, supervision
+   Runtime layer: Pid, mailbox, link, monitor, alias, lifecycle, supervision
    Eio:           Fiber.fork / Switch / Clock — scheduling only.
 
    Switch is not the link graph.  Eio.Switch cancels fibers and closes
@@ -55,8 +55,9 @@ type _ Effect.t +=
   | Now       : float t
   | Exit_me   : string -> unit t
   | Signal    : pid * string -> unit t
-  | Monitor   : pid -> ref t
+  | Monitor   : pid * bool -> ref t
   | Demonitor : ref * bool -> unit t
+  | Send_alias : ref * msg -> unit t
 
 let spawn ?(name = "") ?(link = false) fn =
   perform (Spawn { name; fn; link })
@@ -74,8 +75,9 @@ let trap_exit on = perform (Trap_exit on)
 let now () = perform Now
 let exit_reason reason = perform (Exit_me reason)
 let exit_pid pid reason = perform (Signal (pid, reason))
-let monitor pid = perform (Monitor pid)
+let monitor ?(alias = false) pid = perform (Monitor (pid, alias))
 let demonitor ?(flush = false) r = perform (Demonitor (r, flush))
+let send_alias r msg = perform (Send_alias (r, msg))
 
 type msg +=
   | Exit of pid * string
@@ -128,6 +130,7 @@ struct
   let next_ref = ref 1
   let procs : (pid, proc) Hashtbl.t = Hashtbl.create 32
   let names : (string, pid) Hashtbl.t = Hashtbl.create 16
+  let aliases : (ref, pid) Hashtbl.t = Hashtbl.create 32
 
   let alloc name =
     let pid = !next_pid in
@@ -163,11 +166,13 @@ struct
           match Hashtbl.find_opt procs watcher with
           | Some q when q.alive ->
               Hashtbl.remove q.monitors r;
+              Hashtbl.remove aliases r;
               deliver q.pid (Down (r, p.pid, reason))
-          | _ -> ())
+          | _ -> Hashtbl.remove aliases r)
         p.watched_by;
       Hashtbl.clear p.watched_by;
       Hashtbl.iter (fun r target ->
+          Hashtbl.remove aliases r;
           match Hashtbl.find_opt procs target with
           | Some q -> Hashtbl.remove q.watched_by r
           | None -> ())
@@ -241,14 +246,15 @@ struct
                   Option.iter (fun q -> if q.alive then signal p q reason)
                     (Hashtbl.find_opt procs pid);
                   continue k ())
-          | Monitor pid ->
+          | Monitor (pid, alias) ->
               Some (fun k ->
                   let r = !next_ref in
                   incr next_ref;
                   (match Hashtbl.find_opt procs pid with
                    | Some q when q.alive ->
                        Hashtbl.replace p.monitors r pid;
-                       Hashtbl.replace q.watched_by r p.pid
+                       Hashtbl.replace q.watched_by r p.pid;
+                       if alias then Hashtbl.replace aliases r p.pid
                    | _ -> deliver p.pid (Down (r, pid, "noproc")));
                   continue k r)
           | Demonitor (r, flush) ->
@@ -256,13 +262,20 @@ struct
                   (match Hashtbl.find_opt p.monitors r with
                    | Some pid ->
                        Hashtbl.remove p.monitors r;
+                       Hashtbl.remove aliases r;
                        Option.iter (fun q -> Hashtbl.remove q.watched_by r)
                          (Hashtbl.find_opt procs pid)
-                   | None -> ());
+                   | None -> Hashtbl.remove aliases r);
                   if flush then
                     Mailbox.drop p.mailbox (function
                         | Down (x, _, _) when x = r -> true
                         | _ -> false);
+                  continue k ())
+          | Send_alias (r, msg) ->
+              Some (fun k ->
+                  (match Hashtbl.find_opt aliases r with
+                   | Some pid -> deliver pid msg
+                   | None -> ());
                   continue k ())
           | _ -> None)
       }

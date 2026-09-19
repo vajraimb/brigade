@@ -28,7 +28,7 @@ The **语义** tab is the contract. Selective receive and `link`/`exit` prove th
 | `monitor` | B dies → A gets `DOWN`, A lives |
 | `monitor` dead Pid | immediate `DOWN noproc` |
 | `demonitor flush` | takes the matching `DOWN` out of the mailbox |
-| `gen_server:call` | monitor + Reply; server crash → `DOWN`, client lives |
+| `gen_server:call` | alias + Reply; crash → DOWN; timeout → late Reply drops |
 | `one_for_one` / `rest_for_one` / `one_for_all` | policy, not try/catch |
 | intensity · permanent / transient / temporary | OTP child restart |
 
@@ -51,7 +51,19 @@ They answer different questions:
 
 If link were Switch, `exit(normal)` would cancel the partner, `trap_exit` could not turn a signal into a message, and `unlink` would require reparenting a running fiber. Each process is a fiber forked on the scheduler switch; death of a linked partner is `die` / `propagate` in the runtime. The Switch outlives the process graph. That split is the architecture, not an implementation detail.
 
-`monitor` is the other half of the graph: one direction, never a cascade, always a mailbox message. `gen_server:call` is monitor + send + selective receive of `Reply | DOWN`. Without it, a dead server is a client that waits forever.
+`monitor` is the other half of the graph: one direction, never a cascade, always a mailbox message.
+
+## Alias is not a Pid
+
+OTP 24 (EEP-53) changed `gen:call`. The textbook shape `monitor + send + receive Reply|DOWN` is OTP 23. From OTP 24, `gen:call` does `monitor(Pid, [{alias, demonitor}])` and `gen:reply` is `Alias ! {Tag, Reply}` — not `Pid ! {Tag, Reply}`.
+
+An alias is a Ref that also names a process, until it is deactivated. Send to a dead alias drops, the same way send to a dead Pid drops. `demonitor` deactivates the alias. Timeout therefore cannot leave a stray Reply in the client mailbox: the Reply is addressed to an address that no longer exists.
+
+That is the same stale-Pid rule, with a new trigger: "deactivate when the call ends". Without it, a byte-for-byte diff against OTP 29.1 is a promise sitting on a fault line.
+
+The receive-marker is the other half of the same structure. BEAM sees `Ref = monitor(...)` followed by `receive` whose every clause matches that Ref, and only scans messages that arrived after the Ref was created. Deep-mailbox `call` is O(1) on OTP, O(n) if you scan from the head. The marker is `createdSeq` on the monitor; it is not a separate feature.
+
+`gen_server:call` is: alias-monitor + send + selective receive of `Reply | DOWN`. On timeout, demonitor (alias dies), then one `after 0` scan for a Reply that already entered the queue. Anything later drops.
 
 ## Messages
 
@@ -65,7 +77,15 @@ Erlang `-behaviour(gen_server)` is an attribute. The compiler warns if a callbac
 
 ## Conformance
 
-The kernel is 20 cases (`OTP_IDS` in [`src/lib/actor/semantics.ts`](src/lib/actor/semantics.ts)). `npm run conform` dumps them as `id<TAB>got` TSV. If `escript` is on PATH, it runs [`erlang/conformance.erl`](erlang/conformance.erl) against real OTP and diffs byte-for-byte. Written against OTP 29.1 (2026-09). Missing Erlang is a skip, not a fail.
+The kernel is `OTP_IDS.length` cases in [`src/lib/actor/semantics.ts`](src/lib/actor/semantics.ts). `npm run conform` dumps them as `id<TAB>got<TAB>path` TSV with a `# oracle:` header. Stderr is three-state:
+
+```
+brigade-self     22/22 PASS
+otp-reference    SKIP (no escript)
+differential     SKIP
+```
+
+Missing Erlang is SKIP for the last two, not a silent pass. Written against OTP 29.1 (2026-09). If `escript` is on PATH, `differential` is a byte-identical `got` column.
 
 ```sh
 npm run conform
@@ -75,6 +95,7 @@ escript erlang/conformance.erl
 ## Non-goals (v2)
 
 - **Multi-domain Eio.** Eio does not reuse a fiber across domains. One scheduler switch, one domain. Cross-domain processes, work-stealing, and `Eio.Domain_manager` stay out until the single-domain contract is boring.
+- **Preemptive `kill`.** Eio cancellation is cooperative: a compute-only fiber does not notice `Switch` cancel until the next suspension point. BEAM preempts at a reduction budget (~4000). `exit(Pid, kill)` in this runtime is a flag the scheduler honors at the next effect, not a VM interrupt. That is a runtime property the library layer cannot fake.
 - Distributed Erlang, `net_kernel`, node names.
 - Full `proc_lib` / `sys` / application controller / release handling.
 - Hot code swap, BEAM binary compatibility, ETS.

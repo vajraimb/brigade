@@ -43,6 +43,8 @@ export type SemCase = {
   primitive: string;
   title: string;
   erlang: string;
+  /** Hierarchical contract id, e.g. gen_server/call/timeout. */
+  path?: string;
   run: () => SemResult;
 };
 
@@ -77,8 +79,36 @@ export const OTP_IDS = [
   "demonitor-leaves",
   "gs-call",
   "gs-call-crash",
+  "gs-call-timeout",
+  "gs-call-empty",
   "gs-cast",
 ] as const;
+
+/** Same ids as OTP_IDS, named for UI / TSV / OCaml / Erlang. */
+export const OTP_PATH: Record<(typeof OTP_IDS)[number], string> = {
+  spawn: "process/spawn",
+  "send-receive": "process/send-receive",
+  fifo: "mailbox/fifo",
+  "selective-receive": "mailbox/selective",
+  "mailbox-dies": "mailbox/dies",
+  "drop-dead": "mailbox/drop-dead",
+  "link-cascade": "link/cascade",
+  "normal-no-cascade": "link/normal",
+  "trap-exit": "link/trap-exit",
+  "system-message": "link/system-message",
+  "kill-untrappable": "link/kill",
+  "unlink-isolates": "link/unlink",
+  "exit-pid": "link/exit-pid",
+  "monitor-down": "monitor/down",
+  "monitor-noproc": "monitor/noproc",
+  "demonitor-flush": "monitor/demonitor-flush",
+  "demonitor-leaves": "monitor/demonitor-leaves",
+  "gs-call": "gen_server/call/ok",
+  "gs-call-crash": "gen_server/call/crash",
+  "gs-call-timeout": "gen_server/call/timeout",
+  "gs-call-empty": "gen_server/call/empty",
+  "gs-cast": "gen_server/cast",
+};
 
 const DUMMY: MenuItem = {
   id: "x",
@@ -1169,8 +1199,10 @@ export const CASES: SemCase[] = [
     id: "gs-call",
     group: "genserver",
     primitive: "gen_server:call",
-    title: "call 是 monitor + Reply，不是裸 send/receive",
-    erlang: "gen_server:call(Pid, ping) → pong。server 挂了会 DOWN，而不是永远等。",
+    path: "gen_server/call/ok",
+    title: "call 是 alias + Reply，不是裸 send/receive",
+    erlang:
+      "OTP 24+ gen:call: monitor(Pid, [{alias, demonitor}]). Reply 发给 alias。server 挂了会 DOWN。",
     run() {
       const r = rt();
       let reply: unknown = "";
@@ -1200,6 +1232,7 @@ export const CASES: SemCase[] = [
     id: "gs-call-crash",
     group: "genserver",
     primitive: "gen_server:call crash",
+    path: "gen_server/call/crash",
     title: "server 在 call 中途死，client 拿到 DOWN 还活着",
     erlang: "这就是为什么 call 必须 monitor：否则 client 会永远卡在 receive。",
     run() {
@@ -1251,9 +1284,131 @@ export const CASES: SemCase[] = [
     },
   },
   {
+    id: "gs-call-timeout",
+    group: "genserver",
+    primitive: "gen_server:call timeout",
+    path: "gen_server/call/timeout",
+    title: "超时后 alias 失活，迟到的 Reply 进不了邮箱",
+    erlang:
+      "EEP-53：timeout → demonitor → alias 死。已经进队列的 Reply 还能取；之后发给 alias 的 Reply 丢掉。这是 OTP 23 教科书 call 做不到的。",
+    run() {
+      const r = rt();
+      let err = "";
+      r.spawn(
+        "echo",
+        function* () {
+          yield fx.register("echo", L);
+          const m = (yield fx.receive((x) => x.t === "Call", L)) as Msg;
+          yield fx.sleep(80, L);
+          if (m.t === "Call") {
+            yield fx.send(
+              { alias: m.ref },
+              { t: "Reply", ref: m.ref, reply: "pong" },
+              L,
+            );
+          }
+          yield fx.sleep(99999, L);
+        },
+        undefined,
+        false,
+      );
+      r.flush();
+      const server = r.whereis("echo")!;
+      r.spawn(
+        "client",
+        function* () {
+          yield fx.register("client", L);
+          try {
+            yield* call(server, "ping", L, 20);
+          } catch (e) {
+            err = e instanceof Error ? e.message : String(e);
+          }
+          yield fx.sleep(99999, L);
+        },
+        undefined,
+        false,
+      );
+      r.flush();
+      r.step(30);
+      r.flush();
+      r.step(80);
+      r.flush();
+      const client = r.whereis("client")!;
+      return eq(
+        "timeout · []",
+        `${err || "no-err"} · ${show(tagsOf(r, client))}`,
+        {
+          before: [],
+          after: tagsOf(r, client),
+          step: "late Reply dropped",
+          diagram: {
+            left: { name: "client", live: true },
+            right: { name: "echo", live: true },
+            signal: "alias dead → drop Reply",
+          },
+        },
+      );
+    },
+  },
+  {
+    id: "gs-call-empty",
+    group: "genserver",
+    primitive: "gen_server:call empty",
+    path: "gen_server/call/empty",
+    title: "call 成功后 client 邮箱是空的，不会留下 DOWN",
+    erlang:
+      "server 回完就 normal 退出。client 收到 Reply 后 demonitor；monitor 已拆，没有 DOWN。邮箱 []。",
+    run() {
+      const r = rt();
+      let reply: unknown = "";
+      r.spawn(
+        "echo",
+        function* () {
+          yield fx.register("echo", L);
+          const m = (yield fx.receive((x) => x.t === "Call", L)) as Msg;
+          if (m.t === "Call") {
+            yield fx.send(
+              { alias: m.ref },
+              { t: "Reply", ref: m.ref, reply: "pong" },
+              L,
+            );
+          }
+        },
+        undefined,
+        false,
+      );
+      r.spawn(
+        "client",
+        function* () {
+          yield fx.register("client", L);
+          const pid = (yield fx.whereis("echo", L)) as Pid | null;
+          reply = yield* call(pid!, "ping", L);
+          yield fx.sleep(99999, L);
+        },
+        undefined,
+        false,
+      );
+      r.flush();
+      const client = r.whereis("client")!;
+      return eq(
+        "pong · []",
+        `${reply} · ${show(tagsOf(r, client))}`,
+        {
+          after: tagsOf(r, client),
+          diagram: {
+            left: { name: "client", live: true },
+            right: { name: "echo", live: false },
+            signal: "Reply · demonitor · no DOWN",
+          },
+        },
+      );
+    },
+  },
+  {
     id: "gs-cast",
     group: "genserver",
     primitive: "gen_server:cast",
+    path: "gen_server/cast",
     title: "cast 不等待，发完即走",
     erlang: "gen_server:cast(Pid, Msg) 是 send，没有 monitor，没有 reply。",
     run() {

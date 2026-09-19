@@ -5,6 +5,7 @@ import {
   CASES,
   GROUP_LABEL,
   OTP_IDS,
+  OTP_PATH,
   runCase,
   type SemCase,
   type SemGroup,
@@ -30,7 +31,7 @@ function runMap() {
 
 export function SemanticsLab() {
   const [results, setResults] = useState(runMap);
-  const [open, setOpen] = useState("gs-call");
+  const [open, setOpen] = useState("gs-call-timeout");
 
   useEffect(() => {
     const el = document.querySelector(`[data-case="${open}"]`);
@@ -126,7 +127,7 @@ function Layers() {
     },
     {
       k: "Runtime",
-      v: "Pid · mailbox · link · monitor · supervision  —  Switch ≠ link 图",
+      v: "Pid · mailbox · link · monitor · alias · supervision — Switch ≠ link 图",
     },
   ] as const;
   return (
@@ -162,6 +163,11 @@ function CaseBody({
         />
       )}
       <p className="mt-4 text-sm leading-relaxed text-muted">{c.erlang}</p>
+      {c.path ?? (c.id in OTP_PATH ? OTP_PATH[c.id as keyof typeof OTP_PATH] : null) ? (
+        <p className="mt-2 font-mono text-xs text-subtle">
+          {c.path ?? OTP_PATH[c.id as keyof typeof OTP_PATH]}
+        </p>
+      ) : null}
       <dl className="mt-4 grid gap-3 font-mono text-xs sm:grid-cols-2">
         <div>
           <dt className="text-subtle">want</dt>
